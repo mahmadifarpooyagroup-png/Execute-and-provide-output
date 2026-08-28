@@ -36,6 +36,37 @@ class AtrinDatabase:
                 entry_hash TEXT NOT NULL
             )
         """)
+        
+        # Phase 3: provider_profiles table with fencing_token
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS provider_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider_id TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                auth_state TEXT NOT NULL DEFAULT 'UNKNOWN',
+                fencing_token INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Phase 3: sessions table with fencing_token and lock management
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_id TEXT PRIMARY KEY,
+                provider_profile_id INTEGER NOT NULL,
+                account_id TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'NOT_AUTHENTICATED',
+                lock_owner TEXT,
+                lease_expiry TIMESTAMP,
+                fencing_token INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (provider_profile_id) REFERENCES provider_profiles(id)
+            )
+        """)
+        
         conn.commit()
         conn.close()
 
