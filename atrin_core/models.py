@@ -1,7 +1,7 @@
 from enum import Enum
 from datetime import datetime
-from typing import Optional
-from pydantic import BaseModel
+from typing import List, Optional
+from pydantic import BaseModel, Field
 
 class ConnectionKind(str, Enum):
     WEB = "WEB"
@@ -29,9 +29,42 @@ class AuthState(str, Enum):
     WAITING_FOR_HUMAN_INTERACTION = "WAITING_FOR_HUMAN_INTERACTION"
 
 class WorkflowState(str, Enum):
+    IDLE = "IDLE"
+    PLANNING = "PLANNING"
+    PLAN_READY = "PLAN_READY"
+    EXECUTING = "EXECUTING"
+    OBSERVING = "OBSERVING"
+    VERIFYING = "VERIFYING"
+    REPLANNING = "REPLANNING"
     WAITING_FOR_AUTH = "WAITING_FOR_AUTH"
     WAITING_FOR_NETWORK = "WAITING_FOR_NETWORK"
+    WAITING_FOR_HUMAN_INTERACTION = "WAITING_FOR_HUMAN_INTERACTION"
+    WAITING_FOR_HUMAN_APPROVAL = "WAITING_FOR_HUMAN_APPROVAL"
+    WAITING_FOR_PROVIDER = "WAITING_FOR_PROVIDER"
     RECOVERING = "RECOVERING"
+    FINALIZING = "FINALIZING"
+    REPORTING = "REPORTING"
+    COMPLETED = "COMPLETED"
+    REJECTED = "REJECTED"
+    CANCELLED = "CANCELLED"
+    FAILED = "FAILED"
+
+
+class Step(BaseModel):
+    step_id: str
+    action: str
+    provider_id: str
+    idempotency_key: str = ""
+    status: str = "PENDING"
+    result: Optional[str] = None
+    evidence: Optional[str] = None
+
+
+class Task(BaseModel):
+    task_id: str
+    description: str
+    steps: List[Step] = Field(default_factory=list)
+    status: str = "PENDING"
 
 class Provider(BaseModel):
     id: str

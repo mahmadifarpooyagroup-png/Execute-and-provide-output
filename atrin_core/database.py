@@ -66,6 +66,50 @@ class AtrinDatabase:
                 FOREIGN KEY (provider_profile_id) REFERENCES provider_profiles(id)
             )
         """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS workflows (
+                workflow_id TEXT PRIMARY KEY,
+                goal TEXT NOT NULL,
+                state TEXT NOT NULL,
+                plan_version INTEGER NOT NULL DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                task_id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                description TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                order_index INTEGER NOT NULL,
+                FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS steps (
+                step_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                result TEXT,
+                evidence TEXT,
+                order_index INTEGER NOT NULL,
+                FOREIGN KEY (task_id) REFERENCES tasks(task_id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS workflow_checkpoints (
+                workflow_id TEXT PRIMARY KEY,
+                checkpoint_version INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id)
+            )
+        """)
         
         conn.commit()
         conn.close()
