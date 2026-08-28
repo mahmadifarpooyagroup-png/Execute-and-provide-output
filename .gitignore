@@ -1,0 +1,39 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Database files
+*.db
+*.db-wal
+*.db-shm
+
+# Atrin data directory
+.atrin_data/
+
+# Browser profiles
+browser-profiles/
+
+# Log files
+*.log
+
+# Virtual environments
+venv/
+.env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Distribution
+dist/
+build/
+*.egg-info/
