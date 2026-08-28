@@ -40,7 +40,7 @@ class AtrinDatabase:
         # Phase 3: provider_profiles table with fencing_token
         conn.execute("""
             CREATE TABLE IF NOT EXISTS provider_profiles (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT PRIMARY KEY,
                 provider_id TEXT NOT NULL,
                 account_id TEXT NOT NULL,
                 name TEXT NOT NULL,
@@ -55,7 +55,7 @@ class AtrinDatabase:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id TEXT PRIMARY KEY,
-                provider_profile_id INTEGER NOT NULL,
+                provider_profile_id TEXT NOT NULL,
                 account_id TEXT NOT NULL,
                 state TEXT NOT NULL DEFAULT 'NOT_AUTHENTICATED',
                 lock_owner TEXT,

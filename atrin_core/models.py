@@ -28,6 +28,11 @@ class AuthState(str, Enum):
     WAITING_FOR_AUTH = "WAITING_FOR_AUTH"
     WAITING_FOR_HUMAN_INTERACTION = "WAITING_FOR_HUMAN_INTERACTION"
 
+class WorkflowState(str, Enum):
+    WAITING_FOR_AUTH = "WAITING_FOR_AUTH"
+    WAITING_FOR_NETWORK = "WAITING_FOR_NETWORK"
+    RECOVERING = "RECOVERING"
+
 class Provider(BaseModel):
     id: str
     name: str
