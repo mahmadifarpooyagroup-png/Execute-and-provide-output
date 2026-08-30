@@ -33,6 +33,7 @@ ENV/
 # Atrin specific
 .atrin_data/
 browser-profiles/
+Atrin/BrowserProfiles/
 
 # Logs
 *.log
