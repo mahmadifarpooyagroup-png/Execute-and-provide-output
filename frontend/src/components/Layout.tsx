@@ -6,7 +6,7 @@ const navItems = [
   { label: 'Workflows', to: '/workflows' },
   { label: 'Recovery Center', to: '/recovery' },
   { label: 'Settings', to: '/settings' },
-  { label: 'First Run Wizard', to: '/first-run' },
+  { label: 'First Run Wizard', to: '/wizard' },
 ]
 
 export function Layout() {
