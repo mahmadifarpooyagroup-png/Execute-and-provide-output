@@ -120,6 +120,31 @@ class WorkflowEngine:
             adapter = self.adapters.get(step["provider_id"])
             if adapter is None:
                 raise LookupError(f"No adapter registered for provider: {step['provider_id']}")
+
+            ledger_record = connection.execute(
+                "SELECT status FROM idempotency_ledger WHERE idempotency_key = ?",
+                (step["idempotency_key"],),
+            ).fetchone()
+            if ledger_record and ledger_record["status"] == "CONFIRMED":
+                existing = connection.execute(
+                    "SELECT result, evidence, status FROM steps WHERE step_id = ?",
+                    (step_id,),
+                ).fetchone()
+                connection.execute(
+                    "UPDATE workflows SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE workflow_id = ?",
+                    (WorkflowState.OBSERVING.value, workflow_id),
+                )
+                self._checkpoint(connection, workflow_id, {
+                    "task_id": step["task_id"], "step_id": step_id,
+                    "state": WorkflowState.OBSERVING.value,
+                    "current_action": step["action"], "provider_id": step["provider_id"],
+                    "action_idempotency_key": step["idempotency_key"],
+                    "last_result": existing["result"], "evidence": existing["evidence"],
+                    "checkpoint_version": 1,
+                })
+                connection.commit()
+                return {"result": existing["result"], "evidence": existing["evidence"]}
+
             connection.execute("UPDATE workflows SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE workflow_id = ?",
                                (WorkflowState.EXECUTING.value, workflow_id))
             before = {"task_id": step["task_id"], "step_id": step_id, "state": WorkflowState.EXECUTING.value,
