@@ -1,6 +1,6 @@
 from enum import Enum
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 class ConnectionKind(str, Enum):
@@ -70,10 +70,59 @@ class Provider(BaseModel):
     id: str
     name: str
     description: Optional[str] = None
-    connection_kind: ConnectionKind
-    adapter_id: str
+    roles: List[str] = Field(default_factory=list)
+    connection_kind: ConnectionKind = ConnectionKind.API
+    transport: Optional[str] = None
+    endpoint: Optional[str] = None
+    adapter_id: str = "generic"
+    protocol: Optional[str] = None
+    capability_profile_id: str = "default"
+    authentication_policy: Optional[str] = None
     enabled: bool = True
     priority: int = 10
+    fallback_policy: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    health_status: str = "UNKNOWN"
+    version: Optional[str] = None
+
+    def shares_capability_profile(self, other: "Provider") -> bool:
+        return self.capability_profile_id == other.capability_profile_id
+
+    def is_valid_fallback_for(self, other: "Provider", *, role: Optional[str] = None) -> bool:
+        if not self.shares_capability_profile(other):
+            return False
+        if role is None:
+            return True
+        return role in self.roles and role in other.roles
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "Provider":
+        connection_kind = config.get("connection_kind", "API")
+        capability_profile_id = (
+            config.get("capability_profile_id")
+            or config.get("provider_capability_profile_id")
+            or config.get("profile_id")
+            or "default"
+        )
+        return cls(
+            id=config["id"],
+            name=config.get("name", config["id"]),
+            description=config.get("description"),
+            roles=config.get("roles", []),
+            connection_kind=ConnectionKind(connection_kind),
+            transport=config.get("transport"),
+            endpoint=config.get("endpoint"),
+            adapter_id=config.get("adapter_id", "generic"),
+            protocol=config.get("protocol"),
+            capability_profile_id=capability_profile_id,
+            authentication_policy=config.get("authentication_policy"),
+            enabled=config.get("enabled", True),
+            priority=config.get("priority", 10),
+            fallback_policy=config.get("fallback_policy", {}),
+            metadata=config.get("metadata", {}),
+            health_status=config.get("health_status", "UNKNOWN"),
+            version=config.get("version"),
+        )
 
 class ProviderProfile(BaseModel):
     id: str

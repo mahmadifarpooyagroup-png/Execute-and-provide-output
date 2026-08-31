@@ -10,7 +10,7 @@ from atrin_core.web_adapter import (
 )
 
 
-PAGE = "data:text/html,<html><body><input id='composer'><button id='send'>Send</button><div id='response'></div></body></html>"
+PAGE = "data:text/html,<html><body><input id='composer'><button id='send'>Send</button><div id='response' contenteditable='true' style='display:block;min-height:1em;border:1px solid #ccc;padding:4px;'></div></body></html>"
 
 
 class FakeStrategy(ProviderInteractionStrategy):
@@ -27,10 +27,13 @@ class FakeStrategy(ProviderInteractionStrategy):
 
     async def send_message(self, text):
         await self.page.locator("#composer").fill(text)
-        await self.page.locator("#response").fill(text)
+        await self.page.locator("#response").text_content()
+        await self.page.evaluate("(text) => { document.getElementById('response').textContent = text; }", text)
 
     async def extract_response(self):
-        return await self.page.locator("#response").input_value()
+        response = self.page.locator("#response")
+        text = await response.text_content()
+        return text or ""
 
     async def detect_auth_challenge(self):
         return self.auth_challenge
@@ -62,12 +65,13 @@ async def test_persistent_profile_reuse(tmp_path):
         profile_path=profile_path, start_url=PAGE,
     )
     await first.launch()
+    await first.page.goto("https://example.com")
     await first.page.evaluate("localStorage.setItem('session', 'persisted')")
     await first.close()
 
     second = GenericWebAdapter(
         "provider", "profile", FakeStrategy, mode=BrowserMode.PERSISTENT_BROWSER,
-        profile_path=profile_path, start_url=PAGE,
+        profile_path=profile_path, start_url="https://example.com",
     )
     try:
         await second.launch()

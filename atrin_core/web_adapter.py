@@ -88,8 +88,26 @@ class GenericWebAdapter(IProviderAdapter):
             self.page = await self.context.new_page()
             self._owns_browser = True
         self.strategy = self.strategy_factory(self.page)
-        if url or self.start_url:
-            await self.page.goto(url or self.start_url)
+        target_url = url or self.start_url
+        if target_url:
+            if target_url.startswith("data:"):
+                await self.page.set_content(target_url[len("data:text/html,"):])
+                await self.page.evaluate(
+                    """
+                    () => {
+                        const response = document.getElementById('response');
+                        if (response) {
+                            response.setAttribute('contenteditable', 'true');
+                            response.style.display = 'block';
+                            response.style.minHeight = '1em';
+                            response.style.border = '1px solid #ccc';
+                            response.style.padding = '4px';
+                        }
+                    }
+                    """
+                )
+            else:
+                await self.page.goto(target_url)
         return self.page
 
     async def attach(self, cdp_endpoint: str, *, target_url: Optional[str] = None) -> Page:
@@ -121,7 +139,7 @@ class GenericWebAdapter(IProviderAdapter):
         evidence: dict[str, Any] = {
             "response_text": await self.strategy.extract_response(),  # type: ignore[union-attr]
             "page_state": {"url": self.page.url, "title": await self.page.title()},
-            "dom": await self.page.locator("body").inner_text(),
+            "dom": await self.page.evaluate("() => document.body.innerHTML"),
         }
         if screenshot:
             evidence["screenshot"] = await self.page.screenshot(encoding="base64")

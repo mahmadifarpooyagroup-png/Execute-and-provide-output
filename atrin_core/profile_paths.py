@@ -11,10 +11,10 @@ def get_browser_profile_path(provider_id: str, profile_id: str) -> str:
             "ATRIN_BROWSER_PROFILES_DIR",
             os.path.expanduser("~/.local/share/Atrin/BrowserProfiles"),
         )
-    
-    profile_dir = os.path.join(base_dir, f"{provider_id}-{profile_id}")
+
+    profile_dir = os.path.join(base_dir, f"{provider_id}_{profile_id}")
     os.makedirs(profile_dir, exist_ok=True)
-    
+
     if system != "Windows":
         os.chmod(profile_dir, 0o700)
     return profile_dir
