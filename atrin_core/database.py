@@ -120,6 +120,16 @@ class AtrinDatabase:
                 FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id)
             )
         """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS plugins_registry (
+                plugin_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                version TEXT NOT NULL,
+                is_active BOOLEAN NOT NULL DEFAULT 1,
+                installed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         
         conn.commit()
         conn.close()
