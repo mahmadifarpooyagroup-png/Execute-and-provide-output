@@ -141,6 +141,24 @@ class Session(BaseModel):
     lease_expiry: Optional[datetime] = None
     fencing_token: int = 0
 
+class SyncDirection(str, Enum):
+    PUSH = "PUSH"
+    PULL = "PULL"
+    CONFLICT = "CONFLICT"
+
+class SyncConfig(BaseModel):
+    provider_type: str
+    endpoint_url: Optional[str] = None
+    bucket_name: Optional[str] = None
+    path: Optional[str] = None
+    encryption_key_hash: str
+
+class SyncStatus(BaseModel):
+    last_synced_at: Optional[datetime] = None
+    sync_direction: SyncDirection
+    remote_version: Optional[str] = None
+    local_version: Optional[str] = None
+
 class IdempotencyRecord(BaseModel):
     idempotency_key: str
     workflow_id: str

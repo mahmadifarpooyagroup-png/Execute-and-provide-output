@@ -110,6 +110,16 @@ class AtrinDatabase:
                 FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sync_metadata (
+                workflow_id TEXT PRIMARY KEY,
+                remote_id TEXT NOT NULL,
+                last_synced_at TEXT,
+                sync_status TEXT NOT NULL,
+                conflict_flag INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id)
+            )
+        """)
         
         conn.commit()
         conn.close()
