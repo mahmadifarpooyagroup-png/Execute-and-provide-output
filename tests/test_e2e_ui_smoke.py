@@ -36,4 +36,4 @@ def test_dashboard_and_layout_components_are_present():
     assert "total_providers" in dashboard_source
     assert "providers" in layout_source
     assert "recovery" in layout_source
-    assert "Settings" in layout_source
+    assert "settings" in layout_source
