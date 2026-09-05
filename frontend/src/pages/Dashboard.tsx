@@ -1,7 +1,9 @@
 import { useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useAppStore } from '../store/appStore'
 
 export function DashboardPage() {
+  const { t } = useTranslation()
   const { dashboard, loadDashboard, providers, loadProviders } = useAppStore()
 
   useEffect(() => {
@@ -13,25 +15,25 @@ export function DashboardPage() {
     <section className="page-grid">
       <div className="panel stats-grid">
         <div className="stat-card">
-          <span>Total providers</span>
+          <span>{t('total_providers')}</span>
           <strong>{dashboard?.totalProviders ?? 0}</strong>
         </div>
         <div className="stat-card">
-          <span>Healthy</span>
+          <span>{t('healthy')}</span>
           <strong>{dashboard?.healthyProviders ?? 0}</strong>
         </div>
         <div className="stat-card">
-          <span>Active workflows</span>
+          <span>{t('active_workflows')}</span>
           <strong>{dashboard?.activeWorkflows ?? 0}</strong>
         </div>
         <div className="stat-card">
-          <span>Uptime</span>
+          <span>{t('uptime')}</span>
           <strong>{dashboard?.uptime ?? '0%'}</strong>
         </div>
       </div>
 
       <div className="panel">
-        <h2>Provider health</h2>
+        <h2>{t('provider_health')}</h2>
         <div className="list-block">
           {providers.slice(0, 4).map((provider) => (
             <div key={provider.id} className="row-item">

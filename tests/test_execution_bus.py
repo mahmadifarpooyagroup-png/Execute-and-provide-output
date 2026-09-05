@@ -47,8 +47,11 @@ async def test_timeout_enforcement():
         working_dir=None,
     )
 
-    with pytest.raises(TimeoutError):
-        await bus.execute(action, lambda: True)
+    result = await bus.execute(action, lambda: True)
+
+    assert result.status == "timed_out"
+    assert result.exit_code == 124
+    assert result.error_message == "Action exceeded its 1s timeout."
 
 
 @pytest.mark.asyncio

@@ -78,7 +78,16 @@ class ExecutionBus:
             )
         except asyncio.TimeoutError:
             await self._terminate_tree(proc)
-            raise TimeoutError(f"Action {action.action_id} exceeded timeout of {action.timeout_seconds}s")
+            duration_ms = (time.perf_counter() - start) * 1000.0
+            message = f"Action exceeded its {action.timeout_seconds}s timeout."
+            return ExecutionResult(
+                action_id=action.action_id,
+                status="timed_out",
+                exit_code=124,
+                duration_ms=duration_ms,
+                evidence=self._build_evidence(action, "", message, 124),
+                error_message=message,
+            )
 
         stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
         stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""

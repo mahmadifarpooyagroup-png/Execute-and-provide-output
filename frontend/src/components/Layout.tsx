@@ -4,10 +4,10 @@ import { NavLink, Outlet } from 'react-router-dom'
 
 const navItems = [
   { key: 'dashboard', to: '/' },
-  { key: 'Providers', to: '/providers' },
+  { key: 'providers', to: '/providers' },
   { key: 'workflows', to: '/workflows' },
-  { key: 'Recovery Center', to: '/recovery' },
-  { key: 'Settings', to: '/settings' },
+  { key: 'recovery', to: '/recovery' },
+  { key: 'settings', to: '/settings' },
   { key: 'first_run_wizard', to: '/wizard' },
 ]
 

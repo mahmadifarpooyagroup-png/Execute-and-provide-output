@@ -1,7 +1,9 @@
 import { useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useAppStore } from '../store/appStore'
 
 export function ProvidersPage() {
+  const { t } = useTranslation()
   const { providers, loadProviders } = useAppStore()
 
   useEffect(() => {
@@ -10,7 +12,7 @@ export function ProvidersPage() {
 
   return (
     <section className="panel">
-      <h2>Connected providers</h2>
+      <h2>{t('connected_providers')}</h2>
       <div className="list-block">
         {providers.map((provider) => (
           <div key={provider.id} className="row-item provider-row">

@@ -1,7 +1,9 @@
 import { useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useAppStore } from '../store/appStore'
 
 export function SettingsPage() {
+  const { t } = useTranslation()
   const { settings, loadSettings } = useAppStore()
 
   useEffect(() => {
@@ -10,23 +12,23 @@ export function SettingsPage() {
 
   return (
     <section className="panel settings-panel">
-      <h2>System settings</h2>
+      <h2>{t('system_settings')}</h2>
       <div className="settings-list">
         <div className="setting-row">
-          <span>Theme</span>
+          <span>{t('theme')}</span>
           <strong>{settings.theme}</strong>
         </div>
         <div className="setting-row">
-          <span>Auto recovery</span>
-          <strong>{settings.autoRecover ? 'Enabled' : 'Disabled'}</strong>
+          <span>{t('auto_recovery')}</span>
+          <strong>{settings.autoRecover ? t('enabled') : t('disabled')}</strong>
         </div>
         <div className="setting-row">
-          <span>Retention period</span>
-          <strong>{settings.retentionDays} days</strong>
+          <span>{t('retention_period')}</span>
+          <strong>{settings.retentionDays} {t('days')}</strong>
         </div>
         <div className="setting-row">
-          <span>Notifications</span>
-          <strong>{settings.notifications ? 'Enabled' : 'Disabled'}</strong>
+          <span>{t('notifications')}</span>
+          <strong>{settings.notifications ? t('enabled') : t('disabled')}</strong>
         </div>
       </div>
     </section>

@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -75,6 +76,7 @@ class CloudSyncManager:
     _NONCE_SIZE = 12
     _KEY_SIZE = 32
     _ITERATIONS = 600_000
+    _WORKFLOW_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
     def __init__(
         self,
@@ -189,6 +191,8 @@ class CloudSyncManager:
             raise RuntimeError("Configure a sync provider before syncing checkpoints")
 
     def _remote_id(self, workflow_id: str) -> str:
+        if not self._WORKFLOW_ID.fullmatch(workflow_id):
+            raise ValueError("workflow_id contains unsupported path characters")
         config = self.sync_config
         prefix = config.path.strip("/") if config and config.path else "checkpoints"
         return f"{prefix}/{workflow_id}.checkpoint"

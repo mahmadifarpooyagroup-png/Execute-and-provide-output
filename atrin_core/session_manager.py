@@ -46,15 +46,36 @@ class SessionManager:
 
     def acquire_lock(self, profile_id: str, workflow_id: str) -> int:
         conn = self.db.get_connection()
-        cursor = conn.execute("SELECT fencing_token FROM provider_profiles WHERE id = ?", (profile_id,))
-        row = cursor.fetchone()
-        current_token = row[0] if row else 0
-        
-        new_token = current_token + 1
-        conn.execute("UPDATE provider_profiles SET fencing_token = ? WHERE id = ?", (new_token, profile_id))
-        conn.commit()
-        conn.close()
-        return new_token
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT fencing_token FROM provider_profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"Provider profile is not registered: {profile_id}")
+            new_token = int(row[0]) + 1
+            conn.execute(
+                "UPDATE provider_profiles SET fencing_token = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (new_token, profile_id),
+            )
+            conn.commit()
+            return new_token
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def validate_fencing_token(self, profile_id: str, fencing_token: int) -> bool:
+        """Return whether a caller still owns the current fencing generation."""
+        connection = self.db.get_connection()
+        try:
+            row = connection.execute(
+                "SELECT fencing_token FROM provider_profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+            return row is not None and int(row[0]) == fencing_token
+        finally:
+            connection.close()
 
     def get_session_state(self, profile_id: str) -> str:
         conn = self.db.get_connection()

@@ -54,7 +54,7 @@ class SQLiteCheckpointStore:
         connection.close()
 
     async def save(self, workflow_id: str, checkpoint: Mapping[str, Any]) -> None:
-        payload = dict(checkpoint)
+        payload = _sanitize_checkpoint(checkpoint)
         payload.setdefault("workflow_id", workflow_id)
         version = int(payload.get("checkpoint_version", 1))
         connection = self.database.get_connection()
@@ -80,6 +80,24 @@ class SQLiteCheckpointStore:
             return json.loads(row["payload"]) if row else None
         finally:
             connection.close()
+
+
+def _sanitize_checkpoint(value: Mapping[str, Any], depth: int = 0) -> dict[str, Any]:
+    if depth > 12:
+        raise ValueError("Checkpoint nesting is too deep")
+
+    def sanitize(item: Any, level: int) -> Any:
+        if level > 12:
+            raise ValueError("Checkpoint nesting is too deep")
+        if item is None or isinstance(item, (str, int, float, bool)):
+            return item
+        if isinstance(item, Mapping):
+            return {str(key): sanitize(child, level + 1) for key, child in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [sanitize(child, level + 1) for child in item]
+        raise TypeError(f"Checkpoint contains unsupported value: {type(item).__name__}")
+
+    return sanitize(value, depth)
 
 
 async def _call(method: Any, *args: Any, **kwargs: Any) -> Any:

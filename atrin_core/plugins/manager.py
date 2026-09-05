@@ -21,6 +21,7 @@ class PluginManager:
         "subprocess",
         "sys",
     }
+    _BLOCKED_CALLS = {"__import__", "compile", "eval", "exec", "input", "open"}
 
     def __init__(self):
         self._plugins: dict[str, IPlugin] = {}
@@ -89,9 +90,19 @@ class PluginManager:
                 imported_name = node.module
             if imported_name and imported_name.split(".", 1)[0] in cls._BLOCKED_IMPORTS:
                 raise ValueError(f"Plugin import is not allowed: {imported_name}")
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in cls._BLOCKED_CALLS:
+                raise ValueError(f"Plugin call is not allowed: {node.func.id}")
+            if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
+                raise ValueError("Plugin dunder attribute access is not allowed")
 
     def cleanup(self) -> None:
-        for plugin in self._plugins.values():
-            plugin.cleanup()
+        cleanup_error: Exception | None = None
+        for plugin in tuple(self._plugins.values()):
+            try:
+                plugin.cleanup()
+            except Exception as error:
+                cleanup_error = cleanup_error or error
         self._plugins.clear()
         self._metadata.clear()
+        if cleanup_error is not None:
+            raise RuntimeError("One or more plugins failed during cleanup") from cleanup_error
