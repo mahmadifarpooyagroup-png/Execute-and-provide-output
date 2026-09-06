@@ -22,13 +22,7 @@ async def _call(method: Any, *args: Any, **kwargs: Any) -> Any:
 
 
 class WorkflowEngine:
-    """Vendor-neutral durable workflow engine.
-
-    External side effects are guarded by a DB claim and an adapter-level
-    verification pass. This does not make arbitrary external systems
-    magically transactional, but it prevents concurrent duplicate execution
-    and makes crash recovery explicit.
-    """
+    """Vendor-neutral durable workflow engine."""
 
     _CLAIM_LEASE_SECONDS = 300
 
@@ -156,7 +150,6 @@ class WorkflowEngine:
         return str(status).upper()
 
     async def execute_step(self, workflow_id: str, step_id: str) -> Any:
-        # Phase 1: validate and inspect durable state.
         connection = self.database.get_connection()
         try:
             step = self._step(connection, workflow_id, step_id)
@@ -175,8 +168,6 @@ class WorkflowEngine:
                 ).fetchone()
                 return {"result": existing["result"], "evidence": existing["evidence"]}
 
-            # A previous worker may have committed PENDING/IN_PROGRESS before
-            # crashing. Verify the external system before ever replaying a side effect.
             if ledger and ledger["status"] in {"PENDING", "IN_PROGRESS"}:
                 verified = await self._verify_existing_action(adapter, step["idempotency_key"])
                 if verified == "CONFIRMED":
@@ -184,7 +175,7 @@ class WorkflowEngine:
                         "UPDATE steps SET status='CONFIRMED' WHERE step_id=?", (step_id,)
                     )
                     connection.execute(
-                        "UPDATE idempotency_ledger SET status='CONFIRMED', confirmed_at=CURRENT_TIMESTAMP WHERE idempotency_key=?",
+                        "UPDATE idempotency_ledger SET status='CONFIRMED', confirmed_at=CURRENT_TIMESTAMP, expires_at=NULL WHERE idempotency_key=?",
                         (step["idempotency_key"],),
                     )
                     connection.commit()
@@ -194,19 +185,15 @@ class WorkflowEngine:
                         f"Action {step['idempotency_key']} cannot be safely replayed; verifier returned {verified}"
                     )
 
-            # Atomic claim: only one concurrent caller can transition the ledger
-            # to IN_PROGRESS. SQLite's write transaction serializes this claim.
             connection.execute("BEGIN IMMEDIATE")
             now = datetime.now(timezone.utc)
             expires = (now + timedelta(seconds=self._CLAIM_LEASE_SECONDS)).isoformat()
             if ledger is None:
-                cursor = connection.execute("""
+                connection.execute("""
                     INSERT INTO idempotency_ledger
                     (idempotency_key, workflow_id, step_id, provider_id, status, expires_at)
                     VALUES (?, ?, ?, ?, 'IN_PROGRESS', ?)
                 """, (step["idempotency_key"], workflow_id, step_id, step["provider_id"], expires))
-                if cursor.rowcount != 1:
-                    raise RuntimeError("Unable to claim workflow step")
             else:
                 cursor = connection.execute("""
                     UPDATE idempotency_ledger
@@ -234,7 +221,6 @@ class WorkflowEngine:
         finally:
             connection.close()
 
-        # Phase 2: execute the external side effect outside the DB transaction.
         try:
             result = await _call(adapter.execute, step["action"], step["idempotency_key"])
             evidence = result.get("evidence") if isinstance(result, dict) else None
@@ -243,7 +229,6 @@ class WorkflowEngine:
         except Exception as error:
             result_value, evidence, status = str(error), None, "FAILED"
 
-        # Phase 3: finalize only if the workflow was not cancelled meanwhile.
         connection = self.database.get_connection()
         try:
             current = connection.execute(
@@ -277,14 +262,11 @@ class WorkflowEngine:
                     (step["task_id"],),
                 ).fetchone()
                 if task_counts["total"] and task_counts["done"] == task_counts["total"]:
-                    connection.execute(
-                        "UPDATE tasks SET status='COMPLETED' WHERE task_id=?", (step["task_id"],)
-                    )
-
-                remaining = connection.execute("""
-                    SELECT COUNT(*) AS n FROM tasks
-                    WHERE workflow_id=? AND status!='COMPLETED'
-                """, (workflow_id,)).fetchone()["n"]
+                    connection.execute("UPDATE tasks SET status='COMPLETED' WHERE task_id=?", (step["task_id"],))
+                remaining = connection.execute(
+                    "SELECT COUNT(*) AS n FROM tasks WHERE workflow_id=? AND status!='COMPLETED'",
+                    (workflow_id,),
+                ).fetchone()["n"]
                 next_state = WorkflowState.COMPLETED if remaining == 0 else WorkflowState.OBSERVING
             else:
                 connection.execute(
@@ -302,8 +284,7 @@ class WorkflowEngine:
                 "state": next_state.value,
                 "current_action": step["action"], "provider_id": step["provider_id"],
                 "action_idempotency_key": step["idempotency_key"],
-                "last_result": str(result_value), "evidence": evidence,
-                "checkpoint_version": 1,
+                "last_result": str(result_value), "evidence": evidence, "checkpoint_version": 1,
             })
             connection.commit()
         finally:
@@ -366,8 +347,6 @@ class WorkflowEngine:
             return await recovery_engine.resume_from_checkpoint(workflow_id)
 
         checkpoint = dict(checkpoint)
-        # Never trust an externally supplied checkpoint to change the workflow's
-        # target. Validate identity against the durable DB record first.
         connection = self.database.get_connection()
         try:
             step = self._step(connection, workflow_id, checkpoint.get("step_id", ""))
@@ -377,22 +356,34 @@ class WorkflowEngine:
                 raise ValueError("Checkpoint idempotency key does not match the durable step")
             checkpoint["provider_id"] = step["provider_id"]
             checkpoint["action_idempotency_key"] = step["idempotency_key"]
-            connection.execute("UPDATE workflows SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE workflow_id = ?",
-                               (WorkflowState.RECOVERING.value, workflow_id))
+
+            if skip_action:
+                # The external verifier has already established that the side
+                # effect happened. Persist that fact instead of leaving the
+                # workflow stuck in RECOVERING.
+                connection.execute("UPDATE steps SET status='CONFIRMED' WHERE step_id=?", (step["step_id"],))
+                connection.execute("UPDATE idempotency_ledger SET status='CONFIRMED', confirmed_at=CURRENT_TIMESTAMP, expires_at=NULL WHERE idempotency_key=?", (step["idempotency_key"],))
+                connection.execute("UPDATE tasks SET status='COMPLETED' WHERE task_id=? AND NOT EXISTS (SELECT 1 FROM steps WHERE task_id=? AND status!='CONFIRMED')", (step["task_id"], step["task_id"]))
+                remaining = connection.execute("SELECT COUNT(*) AS n FROM tasks WHERE workflow_id=? AND status!='COMPLETED'", (workflow_id,)).fetchone()["n"]
+                final_state = WorkflowState.COMPLETED if remaining == 0 else WorkflowState.OBSERVING
+                connection.execute("UPDATE workflows SET state=?, updated_at=CURRENT_TIMESTAMP WHERE workflow_id=?", (final_state.value, workflow_id))
+                checkpoint["state"] = final_state.value
+                self._checkpoint(connection, workflow_id, checkpoint)
+                connection.commit()
+                return checkpoint
+
+            connection.execute("UPDATE workflows SET state=?, updated_at=CURRENT_TIMESTAMP WHERE workflow_id = ?", (WorkflowState.RECOVERING.value, workflow_id))
             checkpoint["state"] = WorkflowState.RECOVERING.value
             self._checkpoint(connection, workflow_id, checkpoint)
             connection.commit()
         finally:
             connection.close()
-        if skip_action:
-            return checkpoint
         return await self.execute_step(workflow_id, checkpoint["step_id"])
 
     async def cancel_workflow(self, workflow_id: str) -> None:
         connection = self.database.get_connection()
         try:
-            connection.execute("UPDATE workflows SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE workflow_id = ?",
-                               (WorkflowState.CANCELLED.value, workflow_id))
+            connection.execute("UPDATE workflows SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE workflow_id = ?", (WorkflowState.CANCELLED.value, workflow_id))
             checkpoint = await self.load(workflow_id) or {"workflow_id": workflow_id}
             checkpoint["state"] = WorkflowState.CANCELLED.value
             self._checkpoint(connection, workflow_id, checkpoint)
