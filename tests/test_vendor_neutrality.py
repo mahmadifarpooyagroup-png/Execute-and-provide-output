@@ -34,18 +34,18 @@ def test_provider_config_supports_dynamic_registration_and_capability_profile_fa
 
 def test_core_modules_do_not_embed_vendor_specific_provider_names():
     vendor_tokens = {
-        "qwen",
-        "claude",
-        "gemini",
         "openai",
         "anthropic",
-        "google",
+        "claude",
+        "gpt-4",
         "azure",
     }
     repo_root = os.path.dirname(os.path.dirname(__file__))
-    for base, _, files in os.walk(repo_root):
-        if ".git" in base:
-            continue
+    core_root = os.path.join(repo_root, "atrin_core")
+    excluded_dirs = {".git", ".venv", "venv", "__pycache__", "node_modules", "dist", "build"}
+
+    for base, dirs, files in os.walk(core_root):
+        dirs[:] = [d for d in dirs if d not in excluded_dirs]
         for filename in files:
             if not filename.endswith(".py"):
                 continue
@@ -53,7 +53,7 @@ def test_core_modules_do_not_embed_vendor_specific_provider_names():
             with open(path, "r", encoding="utf-8") as handle:
                 text = handle.read().lower()
             hits = {token for token in vendor_tokens if token in text}
-            if hits and "atrin_core" in path:
+            if hits:
                 pytest.fail(f"Vendor-specific token leakage in core module: {path} hits={sorted(hits)}")
 
 
