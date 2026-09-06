@@ -1,16 +1,25 @@
 import sqlite3
 import os
 
+
 class AtrinDatabase:
     def __init__(self, db_path: str):
         self.db_path = db_path
         self._init_db()
 
+    @staticmethod
+    def _configure_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
+        conn.execute("PRAGMA foreign_keys=ON;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.row_factory = sqlite3.Row
+        return conn
+
     def _init_db(self):
         os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
-        conn = sqlite3.connect(self.db_path)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        
+        conn = self._configure_connection(sqlite3.connect(self.db_path))
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS idempotency_ledger (
                 idempotency_key TEXT PRIMARY KEY,
@@ -23,7 +32,7 @@ class AtrinDatabase:
                 expires_at TIMESTAMP
             )
         """)
-        
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -36,8 +45,7 @@ class AtrinDatabase:
                 entry_hash TEXT NOT NULL
             )
         """)
-        
-        # Phase 3: provider_profiles table with fencing_token
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS provider_profiles (
                 id TEXT PRIMARY KEY,
@@ -50,8 +58,7 @@ class AtrinDatabase:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
-        # Phase 3: sessions table with fencing_token and lock management
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id TEXT PRIMARY KEY,
@@ -120,7 +127,6 @@ class AtrinDatabase:
                 FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id)
             )
         """)
-
         conn.execute("""
             CREATE TABLE IF NOT EXISTS plugins_registry (
                 plugin_id TEXT PRIMARY KEY,
@@ -130,12 +136,21 @@ class AtrinDatabase:
                 installed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
+
+        # Lightweight forward-compatible migration metadata. Existing databases
+        # keep their data; new schema changes should be added as explicit migrations.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS schema_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_metadata (key, value) VALUES ('schema_version', '1')"
+        )
+
         conn.commit()
         conn.close()
 
     def get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.row_factory = sqlite3.Row
-        return conn
+        return self._configure_connection(sqlite3.connect(self.db_path))
