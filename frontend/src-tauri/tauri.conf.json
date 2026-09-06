@@ -32,7 +32,7 @@
       "nsis"
     ],
     "publisher": "Atrin",
-    "copyright": "Copyright © Atrin",
+    "copyright": "Copyright \u00c2\u00a9 Atrin",
     "category": "Utility",
     "shortDescription": "Atrin AI Control Plane",
     "longDescription": "Atrin AI Control Plane provides durable workflow orchestration, provider adapters, and recovery management for end-to-end automation.",
@@ -44,10 +44,8 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "../atrin_core",
-      "../pyproject.toml",
-      "../README.md",
-      "../scripts/ensure-python-runtime.ps1"
+      "../../atrin_core",
+      "../../pyproject.toml"
     ],
     "android": {
       "debugApplicationIdSuffix": ".debug"
