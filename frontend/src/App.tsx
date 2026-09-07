@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import { Layout } from './components/Layout'
 import { DashboardPage } from './pages/Dashboard'
@@ -6,8 +7,16 @@ import { ProvidersPage } from './pages/Providers'
 import { RecoveryCenterPage } from './pages/RecoveryCenter'
 import { SettingsPage } from './pages/Settings'
 import { WorkflowsPage } from './pages/Workflows'
+import { startDesktopRuntime } from './services/desktopRuntime'
 
 function App() {
+  useEffect(() => {
+    void startDesktopRuntime().catch(() => {
+      // The browser development build intentionally runs without the Tauri shell.
+      // Runtime errors are surfaced through the normal API error path in the UI.
+    })
+  }, [])
+
   return (
     <BrowserRouter>
       <Routes>
