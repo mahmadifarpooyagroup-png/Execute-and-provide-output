@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 from enum import Enum
@@ -179,7 +180,8 @@ class GenericWebAdapter(IProviderAdapter):
                 ],
             )
             try:
-                evidence["screenshot"] = await self.page.screenshot(encoding="base64")
+                screenshot_bytes = await self.page.screenshot()
+                evidence["screenshot"] = base64.b64encode(screenshot_bytes).decode("ascii")
             finally:
                 await self.page.evaluate("(id) => document.getElementById(id)?.remove()", style_id)
         return evidence
