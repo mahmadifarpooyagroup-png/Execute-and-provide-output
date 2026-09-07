@@ -155,12 +155,31 @@ class RecoveryEngine:
         await _call(self.checkpoint_store.save, workflow_id, persisted)
         return persisted
 
+    def _database(self) -> AtrinDatabase | None:
+        database = getattr(self.workflow_controller, "database", None)
+        if isinstance(database, AtrinDatabase):
+            return database
+        database = getattr(self.checkpoint_store, "database", None)
+        return database if isinstance(database, AtrinDatabase) else None
+
+    def _has_durable_execution_record(self, workflow_id: str, step_id: str, key: str) -> bool:
+        database = self._database()
+        if database is None:
+            return False
+        connection = database.get_connection()
+        try:
+            row = connection.execute(
+                "SELECT 1 FROM idempotency_ledger WHERE idempotency_key=? AND workflow_id=? AND step_id=? LIMIT 1",
+                (key, workflow_id, step_id),
+            ).fetchone()
+            return row is not None
+        finally:
+            connection.close()
+
     def _finalize_verified_durable_operation(self, workflow_id: str, checkpoint: Mapping[str, Any]) -> None:
         """Finalize a provider-confirmed operation without redispatching it."""
-        database = getattr(self.workflow_controller, "database", None)
-        if not isinstance(database, AtrinDatabase):
-            database = getattr(self.checkpoint_store, "database", None)
-        if not isinstance(database, AtrinDatabase):
+        database = self._database()
+        if database is None:
             raise RuntimeError("A durable AtrinDatabase is required to finalize a verified operation")
         step_id = str(checkpoint.get("step_id") or "")
         key = str(checkpoint.get("action_idempotency_key") or "")
@@ -247,7 +266,12 @@ class RecoveryEngine:
             raise LookupError(f"No checkpoint found for workflow {workflow_id}")
         action_key = checkpoint.get("action_idempotency_key")
         operation_id = checkpoint.get("operation_id")
+        step_id = str(checkpoint.get("step_id") or "")
         verifier_obj = self.external_state_verifier
+        manual_pause = bool(checkpoint.get("waiting_reason")) and bool(step_id) and bool(action_key) and not self._has_durable_execution_record(workflow_id, step_id, str(action_key))
+        if action_key and manual_pause:
+            await _call(self.workflow_controller.resume_workflow, workflow_id, checkpoint)
+            return ResumeResult(workflow_id, "NOT_STARTED", resumed=True)
         if action_key and verifier_obj is None:
             raise RuntimeError("An external state verifier is required for side-effecting actions")
         status = "NOT_STARTED"
