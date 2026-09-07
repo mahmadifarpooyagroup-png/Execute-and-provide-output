@@ -120,7 +120,7 @@ function mapWorkflow(workflow: RuntimeWorkflow): WorkflowItem {
     id: workflow.workflow_id,
     name: workflow.goal,
     status: workflowStatus(workflow.state),
-    progress: workflow.state === 'COMPLETED' ? 100 : 0,
+    progress: workflow.progress ?? (workflow.state === 'COMPLETED' ? 100 : 0),
     owner: 'Runtime',
     updatedAt: workflow.updated_at,
   }
