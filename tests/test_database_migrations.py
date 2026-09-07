@@ -58,24 +58,15 @@ def test_legacy_database_is_upgraded_in_place(tmp_path):
     database = AtrinDatabase(str(db_path))
     connection = database.get_connection()
     try:
-        assert "claim_owner" in {
-            row["name"] for row in connection.execute("PRAGMA table_info(idempotency_ledger)")
-        }
-        assert "attempt" in {
-            row["name"] for row in connection.execute("PRAGMA table_info(idempotency_ledger)")
-        }
-        assert "provider_profile_id" in {
-            row["name"] for row in connection.execute("PRAGMA table_info(steps)")
-        }
-        assert "fencing_token" in {
-            row["name"] for row in connection.execute("PRAGMA table_info(steps)")
-        }
-        assert "revision" in {
-            row["name"] for row in connection.execute("PRAGMA table_info(workflow_checkpoints)")
-        }
-        assert connection.execute(
-            "SELECT value FROM schema_metadata WHERE key='schema_version'"
-        ).fetchone()[0] == "2"
+        ledger_columns = {row["name"] for row in connection.execute("PRAGMA table_info(idempotency_ledger)")}
+        step_columns = {row["name"] for row in connection.execute("PRAGMA table_info(steps)")}
+        workflow_columns = {row["name"] for row in connection.execute("PRAGMA table_info(workflows)")}
+        checkpoint_columns = {row["name"] for row in connection.execute("PRAGMA table_info(workflow_checkpoints)")}
+        assert {"claim_owner", "attempt", "operation_id"}.issubset(ledger_columns)
+        assert {"provider_profile_id", "fencing_token", "operation_id", "side_effecting"}.issubset(step_columns)
+        assert "client_request_id" in workflow_columns
+        assert "revision" in checkpoint_columns
+        assert connection.execute("SELECT value FROM schema_metadata WHERE key='schema_version'").fetchone()[0] == "4"
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     finally:
         connection.close()
