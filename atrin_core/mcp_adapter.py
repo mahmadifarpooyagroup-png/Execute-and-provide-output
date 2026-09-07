@@ -14,27 +14,17 @@ class MCPAdapter(IProviderAdapter):
 
     PROTOCOL_VERSION = "2026-07-28"
 
-    def __init__(
-        self,
-        config: MCPConfig,
-        *,
-        client: Optional[httpx.AsyncClient] = None,
-        timeout: float = 10.0,
-    ) -> None:
+    def __init__(self, config: MCPConfig, *, client: Optional[httpx.AsyncClient] = None, timeout: float = 10.0) -> None:
         self.config = config
         self.timeout = timeout
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=timeout)
-        self.protocol_state = ProtocolConnection(
-            protocol_type=ProtocolType.MCP,
-            config=config,
-            state="DISCONNECTED",
-            health="UNKNOWN",
-        )
+        self.protocol_state = ProtocolConnection(protocol_type=ProtocolType.MCP, config=config, state="DISCONNECTED", health="UNKNOWN")
         self.workflow_state = "IDLE"
         self._connected = False
         self._request_ids = itertools.count(1)
         self._last_operation_key: Optional[str] = None
+        self._last_operation_id: Optional[str] = None
         self._last_operation_result: Optional[Dict[str, Any]] = None
 
     def _url(self) -> str:
@@ -53,9 +43,6 @@ class MCPAdapter(IProviderAdapter):
         return headers
 
     async def connect(self) -> ProtocolConnection:
-        # The 2026-07-28 stateless HTTP model does not require a session
-        # handshake. Connection here is a local readiness state; the first
-        # real MCP request performs the actual server availability check.
         self._connected = True
         self.protocol_state.state = "CONNECTED"
         self.protocol_state.health = "HEALTHY"
@@ -73,26 +60,31 @@ class MCPAdapter(IProviderAdapter):
         arguments: Dict[str, Any],
         *,
         idempotency_key: Optional[str] = None,
+        operation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         await self._ensure_connected()
-        response = await self._rpc(
-            "tools/call",
-            params={"name": tool_name, "arguments": arguments},
-            name=tool_name,
-        )
+        response = await self._rpc("tools/call", params={"name": tool_name, "arguments": arguments}, name=tool_name)
         result = response.get("result", response)
         normalized = result if isinstance(result, dict) else {"result": result}
         self._last_operation_key = idempotency_key
+        self._last_operation_id = operation_id
         self._last_operation_result = normalized
         return normalized
 
-    async def execute(self, action: str, idempotency_key: str, *, fencing_token: int | None = None) -> Dict[str, Any]:
-        return await self.call_tool(action, {}, idempotency_key=idempotency_key)
+    async def execute(self, action: str, idempotency_key: str, *, operation_id: str | None = None,
+                      fencing_token: int | None = None) -> Dict[str, Any]:
+        return await self.call_tool(action, {}, idempotency_key=idempotency_key, operation_id=operation_id)
 
-    async def verify_action(self, idempotency_key: str) -> str:
-        if self._last_operation_key != idempotency_key:
+    async def verify_action(self, idempotency_key: str, *, operation_id: str | None = None) -> str:
+        if self._last_operation_key != idempotency_key or self._last_operation_id != operation_id:
             return "AMBIGUOUS"
         return "CONFIRMED" if self._last_operation_result is not None else "AMBIGUOUS"
+
+    async def cancel(self, idempotency_key: str, *, operation_id: str | None = None) -> bool:
+        # MCP has no generic cancellation semantics that can safely be inferred
+        # for arbitrary tools. Tool-specific cancellation must be implemented as
+        # a provider capability rather than guessed here.
+        return False
 
     async def disconnect(self) -> None:
         self._connected = False
