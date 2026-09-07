@@ -1,5 +1,3 @@
-from datetime import datetime, timezone
-
 import pytest
 
 from atrin_core.cloud_sync import CloudSyncManager
