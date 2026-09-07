@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import inspect
 import json
 from collections.abc import Mapping
