@@ -199,8 +199,8 @@ class AtrinDatabase:
             )
         """)
         conn.execute(
-            "INSERT INTO schema_metadata(key, value) VALUES ('schema_version', ?)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            "INSERT INTO schema_metadata(key, value) VALUES ('schema_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (str(self.CURRENT_SCHEMA_VERSION),),
         )
 
