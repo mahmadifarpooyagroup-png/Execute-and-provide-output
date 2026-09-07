@@ -9,7 +9,6 @@ from .models import AuthState
 class IProviderAdapter(ABC):
     """Common runtime contract for all provider adapters."""
 
-    @abstractmethod
     async def execute(
         self,
         action: str,
@@ -17,7 +16,7 @@ class IProviderAdapter(ABC):
         *,
         fencing_token: int | None = None,
     ) -> Any:
-        raise NotImplementedError
+        raise NotImplementedError("Provider adapter must implement execute()")
 
     @abstractmethod
     async def verify_action(self, idempotency_key: str) -> str:
