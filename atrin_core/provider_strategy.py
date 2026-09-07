@@ -10,24 +10,28 @@ class ProviderInteractionStrategy(ABC):
 
     @abstractmethod
     async def detect_login_page(self) -> bool:
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     async def locate_composer(self) -> Any:
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     async def send_message(self, text: str) -> None:
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     async def extract_response(self) -> str:
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     async def detect_auth_challenge(self) -> bool:
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     async def detect_completion(self) -> bool:
-        pass
+        raise NotImplementedError
+
+    async def verify_action(self, idempotency_key: str) -> bool:
+        """Return True only when the provider can correlate the requested action with its result."""
+        return False
