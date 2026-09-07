@@ -67,6 +67,9 @@ class FailingUIAutomationBackend:
 
 
 class CliFallbackBackend:
+    def launch_app(self, app_path: str) -> WindowInfo:
+        return WindowInfo(window_id="cli-window", title=app_path, process_name="TestApp", automation_id="cli-window")
+
     def inspect_ui(self, window_id: str) -> List[UIElement]:
         return [UIElement(element_id="cli-login", name="CLI Login", control_type="Button", value=None, children=[])]
 
