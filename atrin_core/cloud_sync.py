@@ -96,7 +96,8 @@ class CloudSyncManager:
         self._encryption_key: bytes | None = None
 
     async def close(self) -> None:
-        close = getattr(self.storage_provider, "close", None)
+        provider = self.storage_provider
+        close = getattr(provider, "close", None) if provider is not None else None
         if callable(close):
             result = close()
             if inspect.isawaitable(result):
@@ -112,27 +113,33 @@ class CloudSyncManager:
         endpoint = config.get("endpoint_url")
         bucket = config.get("bucket_name")
         path = config.get("path")
-        if provider_type in {"s3", "webdav"} and not endpoint:
+        if provider_type in {"s3", "webdav"} and not isinstance(endpoint, str):
             raise ValueError("endpoint_url is required for HTTP storage providers")
-        if provider_type == "s3" and not bucket:
+        if provider_type == "s3" and not isinstance(bucket, str):
             raise ValueError("bucket_name is required for s3 storage")
-        if provider_type == "local_network" and not (path or endpoint):
+        if provider_type == "local_network" and not (isinstance(path, str) or isinstance(endpoint, str)):
             raise ValueError("path or endpoint_url is required for local_network storage")
 
-        salt = config.get("key_salt", "atrin-cloud-sync-v1").encode()
+        salt_value = config.get("key_salt", "atrin-cloud-sync-v1")
+        if not isinstance(salt_value, str):
+            raise ValueError("config.key_salt must be a string")
+        salt = salt_value.encode()
         self._encryption_key = self._derive_key(passphrase, salt)
         self.sync_config = SyncConfig(
             provider_type=provider_type,
-            endpoint_url=endpoint,
-            bucket_name=bucket,
-            path=path,
+            endpoint_url=endpoint if isinstance(endpoint, str) else None,
+            bucket_name=bucket if isinstance(bucket, str) else None,
+            path=path if isinstance(path, str) else None,
             encryption_key_hash=hashlib.sha256(passphrase.encode()).hexdigest(),
         )
         if provider_type == "local_network":
-            self.storage_provider = LocalNetworkStorageProvider(path or self._file_url_path(endpoint))
+            local_path = path if isinstance(path, str) else self._file_url_path(endpoint if isinstance(endpoint, str) else None)
+            self.storage_provider = LocalNetworkStorageProvider(local_path)
         else:
+            assert isinstance(endpoint, str)
             base_url = endpoint.rstrip("/")
             if provider_type == "s3":
+                assert isinstance(bucket, str)
                 base_url = f"{base_url}/{quote(bucket, safe='')}"
             self.storage_provider = HTTPStorageProvider(base_url, dict(config.get("headers", {})))
         return self.sync_config
@@ -171,7 +178,7 @@ class CloudSyncManager:
         return hashlib.sha256(cls._canonical_checkpoint(checkpoint).encode()).hexdigest()
 
     async def push_checkpoint(self, workflow_id: str) -> SyncStatus:
-        self._require_provider()
+        provider = self._require_provider()
         checkpoint = await self._call(self.recovery_engine.checkpoint_store.load, workflow_id)
         if checkpoint is None:
             raise LookupError(f"No checkpoint found for workflow {workflow_id}")
@@ -186,29 +193,31 @@ class CloudSyncManager:
             "format_version": self._FORMAT_VERSION,
         }
         remote_id = self._remote_id(workflow_id)
-        await self._call(self.storage_provider.upload, remote_id, self.encrypt_payload(envelope))
+        await self._call(provider.upload, remote_id, self.encrypt_payload(envelope))
         self._write_metadata(workflow_id, remote_id, synced_at, SyncDirection.PUSH, False)
         return SyncStatus(last_synced_at=datetime.fromisoformat(synced_at), sync_direction=SyncDirection.PUSH,
                           remote_version=str(revision), local_version=str(revision))
 
     async def pull_checkpoint(self, workflow_id: str) -> dict:
-        self._require_provider()
+        provider = self._require_provider()
         remote_id = self._remote_id(workflow_id)
-        remote = self.decrypt_payload(await self._call(self.storage_provider.download, remote_id))
+        remote = self.decrypt_payload(await self._call(provider.download, remote_id))
         checkpoint = remote.get("checkpoint", remote)
         if not isinstance(checkpoint, dict):
             raise ValueError("Remote checkpoint payload is invalid")
         remote_revision = int(remote.get("revision", checkpoint.get("revision", 0)))
         remote_hash = str(remote.get("content_hash") or self._content_hash(checkpoint))
         local = await self._call(self.recovery_engine.checkpoint_store.load, workflow_id)
-        local_revision = int(local.get("revision", 0)) if local else None
-        local_hash = self._content_hash(local) if local else None
+        local_revision = int(local.get("revision", 0)) if isinstance(local, dict) else None
+        local_hash = self._content_hash(local) if isinstance(local, dict) else None
         remote_timestamp = self._timestamp(remote.get("synced_at") or checkpoint.get("updated_at"))
 
         if local is None:
             conflict = False
         else:
-            conflict = (remote_revision != int(local_revision)) or (remote_hash != local_hash)
+            assert local_revision is not None
+            assert local_hash is not None
+            conflict = remote_revision != local_revision or remote_hash != local_hash
 
         self._write_metadata(
             workflow_id, remote_id, remote_timestamp,
@@ -231,9 +240,10 @@ class CloudSyncManager:
             raise RuntimeError("Configure a sync provider before encrypting payloads")
         return self._encryption_key
 
-    def _require_provider(self) -> None:
+    def _require_provider(self) -> StorageProvider:
         if self.sync_config is None or self.storage_provider is None:
             raise RuntimeError("Configure a sync provider before syncing checkpoints")
+        return self.storage_provider
 
     def _remote_id(self, workflow_id: str) -> str:
         if not self._WORKFLOW_ID.fullmatch(workflow_id):
