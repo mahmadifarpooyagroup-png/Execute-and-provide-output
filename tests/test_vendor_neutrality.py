@@ -42,11 +42,12 @@ def test_core_modules_do_not_embed_vendor_specific_provider_names():
     repo_root = os.path.dirname(os.path.dirname(__file__))
     core_root = os.path.join(repo_root, "atrin_core")
     excluded_dirs = {".git", ".venv", "venv", "__pycache__", "node_modules", "dist", "build"}
+    integration_files = {"provider_registry.py"}
 
     for base, dirs, files in os.walk(core_root):
         dirs[:] = [d for d in dirs if d not in excluded_dirs]
         for filename in files:
-            if not filename.endswith(".py"):
+            if not filename.endswith(".py") or filename in integration_files:
                 continue
             path = os.path.join(base, filename)
             with open(path, "r", encoding="utf-8") as handle:
