@@ -29,6 +29,17 @@ def wait_for_http(url: str, timeout: float = 30.0) -> None:
     raise RuntimeError(f"Timed out waiting for {url}: {last_error}")
 
 
+def stop_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
 @pytest.fixture(scope="module")
 def browser_servers(tmp_path_factory):
     root = tmp_path_factory.mktemp("ui-e2e")
@@ -44,7 +55,7 @@ def browser_servers(tmp_path_factory):
     runtime = subprocess.Popen(
         [sys.executable, "tests/ui_e2e_server.py"],
         env=env,
-        stdout=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
         stderr=subprocess.STDOUT,
         text=True,
     )
@@ -52,7 +63,7 @@ def browser_servers(tmp_path_factory):
         ["npm", "run", "dev", "--", "--host", "127.0.0.1", "--port", "5173"],
         cwd="frontend",
         env=env,
-        stdout=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
         stderr=subprocess.STDOUT,
         text=True,
     )
@@ -61,13 +72,8 @@ def browser_servers(tmp_path_factory):
         wait_for_http(FRONTEND_URL)
         yield frontend, runtime
     finally:
-        for process in (frontend, runtime):
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+        stop_process(frontend)
+        stop_process(runtime)
 
 
 def seed_session(page: Page) -> None:
@@ -81,8 +87,10 @@ def test_provider_and_workflow_journey(browser_servers):
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = browser.new_page()
+        page.set_default_timeout(10000)
+        page.set_default_navigation_timeout(30000)
         seed_session(page)
-        page.goto(FRONTEND_URL, wait_until="networkidle")
+        page.goto(FRONTEND_URL, wait_until="domcontentloaded")
 
         page.get_by_role("link", name="Providers").click()
         page.get_by_label("Profile ID").fill("ui-e2e-profile")
