@@ -24,6 +24,7 @@ wheels/
 venv/
 env/
 ENV/
+.venv/
 
 # Database
 *.db
@@ -34,6 +35,24 @@ ENV/
 .atrin_data/
 browser-profiles/
 Atrin/BrowserProfiles/
+playwright-report/
+
+# Local nested repositories / developer workspaces
+vs code/
+
+# Secrets and credentials
+.env
+.env.*
+!.env.example
+*.token
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+credentials.json
+secrets.json
 
 # Logs
 *.log
@@ -48,10 +67,10 @@ Atrin/BrowserProfiles/
 # Testing
 .pytest_cache/
 .coverage
+coverage.xml
 htmlcov/
 .tox/
 
 # OS
 .DS_Store
 Thumbs.db
-.venv/
