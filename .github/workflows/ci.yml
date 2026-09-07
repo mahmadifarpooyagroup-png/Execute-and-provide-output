@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   python:
@@ -33,7 +33,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+          key: playwright-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
       - name: Install Playwright browser dependencies
         run: python -m playwright install --with-deps chromium
       - name: Compile Python sources
@@ -92,7 +92,19 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt
-          cache: true
+          cache: false
+      - name: Synchronize Cargo.lock
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          cargo generate-lockfile
+          if ! git diff --quiet -- frontend/src-tauri/Cargo.lock; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add frontend/src-tauri/Cargo.lock
+            git commit -m "chore(tauri): synchronize Cargo.lock [skip ci]"
+            git push
+          fi
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
       - name: Check Tauri Rust project
@@ -113,7 +125,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-          cache: true
+          cache: false
       - name: Install frontend dependencies
         run: npm ci
       - name: Build Windows NSIS package
