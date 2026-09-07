@@ -16,6 +16,7 @@ export interface ProviderItem {
   id: string
   name: string
   type: string
+  accountId: string
   status: ProviderStatus
   lastSync: string
   capability: string
@@ -113,6 +114,7 @@ function mapProvider(provider: RuntimeProvider): ProviderItem {
     id: provider.profile_id,
     name: provider.name,
     type: provider.provider_id,
+    accountId: provider.account_id,
     status: providerStatus(provider),
     lastSync: provider.updated_at,
     capability: 'Runtime provider profile',
