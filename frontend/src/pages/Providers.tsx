@@ -19,8 +19,6 @@ export function ProvidersPage() {
   useEffect(() => {
     let active = true
     void loadProviders().catch(() => undefined)
-    setCatalogLoading(true)
-    setCatalogError(null)
     void getProviderCatalog()
       .then((items) => {
         if (active) setCatalog(items)
