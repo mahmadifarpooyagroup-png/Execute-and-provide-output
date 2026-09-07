@@ -356,9 +356,10 @@ class WorkflowEngine:
         try:
             connection.execute("BEGIN IMMEDIATE")
             step = self._step(connection, workflow_id, step_id)
-            adapter = self.adapters.get(step["provider_id"])
-            if adapter is None:
+            registered_adapter = self.adapters.get(step["provider_id"])
+            if registered_adapter is None:
                 raise LookupError(f"No adapter registered for provider: {step['provider_id']}")
+            adapter = registered_adapter
             key = step["idempotency_key"]
             operation_id = step["operation_id"]
             ledger = connection.execute("SELECT * FROM idempotency_ledger WHERE idempotency_key=?", (key,)).fetchone()
