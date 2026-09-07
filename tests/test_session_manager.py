@@ -4,7 +4,6 @@ import tempfile
 import pytest
 
 from atrin_core.database import AtrinDatabase
-from atrin_core.models import AuthState
 from atrin_core.profile_paths import get_browser_profile_path
 from atrin_core.session_manager import SessionManager
 
@@ -24,7 +23,7 @@ def test_create_and_lock_profile():
         token1_again = manager.acquire_lock(profile_id, "workflow-1")
         assert token1_again == token1
 
-        with pytest.raises(RuntimeError, match="locked by workflow-1"):
+        with pytest.raises(RuntimeError, match="locked by workflow: workflow-1"):
             manager.acquire_lock(profile_id, "workflow-2")
 
         assert manager.renew_lock(profile_id, "workflow-1", token1) is True
@@ -41,9 +40,7 @@ def test_expired_owner_can_be_replaced_with_new_fencing_generation():
         token1 = manager.acquire_lock(profile_id, "workflow-1")
 
         connection = db.get_connection()
-        connection.execute(
-            "UPDATE sessions SET lease_expiry=0 WHERE session_id=?", (profile_id,)
-        )
+        connection.execute("UPDATE sessions SET lease_expiry=0 WHERE session_id=?", (profile_id,))
         connection.commit()
         connection.close()
 
