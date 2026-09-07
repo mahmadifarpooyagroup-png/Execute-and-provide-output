@@ -15,14 +15,14 @@
 
 The shipped FastAPI application exposes authenticated local endpoints for provider catalog discovery, provider profiles, workflow creation/list/detail, step execution, pause/resume/cancel, session acquire/renew/release, recovery listing, and audit listing. The React frontend uses the same authenticated runtime API; deterministic mock service paths are no longer part of the active application path.
 
-The runtime can build provider adapters automatically from the vendor-neutral registry. Provider-specific behavior remains outside the workflow engine.
+The runtime builds provider adapters automatically from the vendor-neutral registry. Provider-specific behavior remains outside the workflow engine.
 
 ## Base URL
 
 The local runtime defaults to `http://127.0.0.1:8765`. Start it with:
 
 ```bash
-uvicorn atrin_core.runtime:app --host 127.0.0.1 --port 8765
+uvicorn atrin_core.runtime:create_app --factory --host 127.0.0.1 --port 8765
 ```
 
 The service intentionally binds to loopback by default.
@@ -36,9 +36,7 @@ TOKEN=$(cat .atrin_data/runtime_secret.token)
 curl -H "X-Atrin-Token: $TOKEN" http://127.0.0.1:8765/api/v1/status
 ```
 
-Do not place the token in source control, URLs, browser bookmarks, or support logs.
-
-The desktop UI stores the token only for the current browser/Tauri session through `sessionStorage`.
+Do not place the token in source control, URLs, browser bookmarks, or support logs. The desktop UI stores the token only for the current browser/Tauri session through `sessionStorage`.
 
 ## Provider Registry
 
@@ -47,7 +45,7 @@ Providers are configured through `ATRIN_PROVIDERS_JSON` or `ATRIN_PROVIDERS_FILE
 Built-in adapter IDs:
 
 - `web` / `generic-web`: configurable browser interaction strategy.
-- `api` / `openai-compatible`: generic chat-completions-style HTTP adapter.
+- `api` / `chat-completions`: generic chat-completions-style HTTP adapter.
 - `mcp`: MCP server adapter.
 - `a2a`: A2A JSON-RPC task adapter.
 - `acp`: ACP session adapter.
@@ -59,7 +57,7 @@ Example:
   {
     "id": "my-api",
     "name": "My API",
-    "adapter_id": "openai-compatible",
+    "adapter_id": "chat-completions",
     "connection_kind": "API",
     "endpoint": "https://example.invalid/v1",
     "metadata": {
@@ -234,7 +232,7 @@ The API currently uses FastAPI's `detail` error shape rather than a separate ver
 
 Developers integrating directly with the Python core can use:
 
-- `AtrinDatabase(db_path)` for SQLite initialization, safety pragmas, and forward-compatible additive migrations.
+- `AtrinDatabase(db_path)` for SQLite initialization, safety pragmas, and additive migrations.
 - `SessionManager` for provider profiles, leases, and fencing.
 - `ProviderAdapterRegistry` for configuration-driven provider discovery and adapter construction.
 - `WorkflowEngine.create_workflow(goal, plan)` for durable workflow creation.
