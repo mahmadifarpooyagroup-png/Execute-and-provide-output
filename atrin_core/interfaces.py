@@ -7,22 +7,28 @@ from .models import AuthState
 
 
 class IProviderAdapter(ABC):
-    """Common runtime contract for all provider adapters."""
+    """Common runtime contract shared by every provider adapter."""
 
     async def execute(
         self,
         action: str,
         idempotency_key: str,
         *,
+        operation_id: str | None = None,
         fencing_token: int | None = None,
     ) -> Any:
         raise NotImplementedError("Provider adapter must implement execute()")
 
     @abstractmethod
-    async def verify_action(self, idempotency_key: str) -> str:
+    async def verify_action(
+        self,
+        idempotency_key: str,
+        *,
+        operation_id: str | None = None,
+    ) -> str:
         raise NotImplementedError
 
-    async def cancel(self, idempotency_key: str) -> bool:
+    async def cancel(self, idempotency_key: str, *, operation_id: str | None = None) -> bool:
         return False
 
     async def health(self) -> str:
@@ -37,17 +43,21 @@ class IProviderAdapter(ABC):
 
 class ISessionProvider(ABC):
     @abstractmethod
-    async def get_session_state(self, profile_id: str) -> AuthState:
+    def get_session_state(self, profile_id: str) -> str:
         raise NotImplementedError
 
     @abstractmethod
-    async def acquire_lock(self, profile_id: str, workflow_id: str) -> int:
+    def acquire_lock(self, profile_id: str, workflow_id: str) -> int:
         raise NotImplementedError
 
     @abstractmethod
-    async def renew_lock(self, profile_id: str, workflow_id: str, fencing_token: int) -> bool:
+    def renew_lock(self, profile_id: str, workflow_id: str, fencing_token: int) -> bool:
         raise NotImplementedError
 
     @abstractmethod
-    async def release_lock(self, profile_id: str, workflow_id: str, fencing_token: int) -> bool:
+    def release_lock(self, profile_id: str, workflow_id: str, fencing_token: int) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def validate_execution_lease(self, profile_id: str, workflow_id: str, fencing_token: int) -> bool:
         raise NotImplementedError
