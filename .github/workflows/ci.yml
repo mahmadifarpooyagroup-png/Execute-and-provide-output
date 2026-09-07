@@ -47,3 +47,19 @@ jobs:
         run: npm run lint
       - name: Build
         run: npm run build
+
+  tauri:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Check Tauri Rust project
+        run: cargo check --locked
