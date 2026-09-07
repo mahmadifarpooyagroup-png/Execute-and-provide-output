@@ -30,6 +30,18 @@ def test_registry_catalog_and_chat_adapter_config():
     assert "api" in catalog[0]["capabilities"]
 
 
+def test_registry_accepts_legacy_compatible_chat_alias():
+    registry = ProviderAdapterRegistry()
+    provider = registry.register({
+        "id": "legacy-api",
+        "adapter_id": "openai-compatible",
+        "endpoint": "http://127.0.0.1:9000/v1",
+        "metadata": {"api": {"model": "demo-model", "api_key_env": "DEMO_API_KEY"}},
+    })
+    assert provider.adapter_id == "openai-compatible"
+    assert registry.catalog()[0]["capabilities"] == ["api", "chat", "text"]
+
+
 def test_registry_rejects_unknown_adapter():
     registry = ProviderAdapterRegistry()
     with pytest.raises(ValueError, match="Unsupported provider adapter"):
