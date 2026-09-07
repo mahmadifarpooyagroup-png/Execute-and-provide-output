@@ -263,12 +263,14 @@ class RecoveryEngine:
 
         action_key = checkpoint.get("action_idempotency_key")
         operation_id = checkpoint.get("operation_id")
-        if action_key and self.external_state_verifier is None:
+        verifier_obj = self.external_state_verifier
+        if action_key and verifier_obj is None:
             raise RuntimeError("An external state verifier is required for side-effecting actions")
 
         status = "NOT_STARTED"
         if action_key:
-            verifier = self.external_state_verifier.verify_action
+            assert verifier_obj is not None
+            verifier = verifier_obj.verify_action
             kwargs = {"operation_id": operation_id} if _supports_keyword(verifier, "operation_id") else {}
             status = str(await _call(verifier, action_key, **kwargs)).upper()
 
