@@ -52,31 +52,51 @@ class LocalSecurityManager:
         finally:
             kernel32.LocalFree(out_blob.pbData)
 
+    @staticmethod
+    def _is_valid_token(value: str) -> bool:
+        return len(value) >= 32 and "\x00" not in value and "\n" not in value and "\r" not in value
+
+    def _encode_for_storage(self, token: str) -> bytes:
+        return base64.b64encode(self._windows_protect(token.encode("utf-8")))
+
     def _write_token(self, token: str) -> None:
         token_path = Path(self.token_file_path).expanduser()
         token_path.parent.mkdir(parents=True, exist_ok=True)
-        raw = token.encode("utf-8")
-        protected = self._windows_protect(raw)
-        encoded = base64.b64encode(protected)
-        descriptor = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        temporary = token_path.with_name(token_path.name + ".tmp")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
-            os.write(descriptor, encoded)
+            os.write(descriptor, self._encode_for_storage(token))
         finally:
             os.close(descriptor)
         if os.name != "nt":
-            os.chmod(token_path, 0o600)
+            os.chmod(temporary, 0o600)
+        os.replace(temporary, token_path)
 
     def _read_token(self, token_path: Path) -> str:
-        encoded = token_path.read_bytes()
+        stored = token_path.read_bytes()
+
+        # Preferred format: base64-wrapped protected bytes.
         try:
-            protected = base64.b64decode(encoded, validate=True)
+            protected = base64.b64decode(stored, validate=True)
             raw = self._windows_unprotect(protected)
-        except Exception as error:
-            raise RuntimeError("Stored runtime token cannot be decrypted or is corrupted") from error
-        token = raw.decode("utf-8").strip()
-        if len(token) < 32:
-            raise RuntimeError("Stored token is invalid")
-        return token
+            token = raw.decode("utf-8").strip()
+            if self._is_valid_token(token):
+                return token
+        except Exception:
+            pass
+
+        # Legacy format: plaintext token written by older Atrin versions.
+        try:
+            legacy = stored.decode("utf-8").strip()
+        except UnicodeDecodeError as error:
+            raise RuntimeError("Stored runtime token is corrupted") from error
+        if not self._is_valid_token(legacy):
+            raise RuntimeError("Stored runtime token is invalid or corrupted")
+
+        # Upgrade in place so an existing installation continues working while
+        # immediately moving to the new protected storage format.
+        self._write_token(legacy)
+        return legacy
 
     def get_or_create_token(self) -> str:
         if self._token:
@@ -96,7 +116,7 @@ class LocalSecurityManager:
         return self._token
 
     def validate_token(self, provided_token: str) -> bool:
-        if not isinstance(provided_token, str) or len(provided_token) < 32:
+        if not isinstance(provided_token, str) or not self._is_valid_token(provided_token):
             return False
         try:
             return secrets.compare_digest(provided_token, self.get_or_create_token())
