@@ -83,7 +83,10 @@ fn wait_for_runtime_ready(timeout: Duration) -> bool {
 }
 
 #[tauri::command]
-fn start_runtime(app: tauri::AppHandle, state: State<'_, RuntimeProcess>) -> Result<String, String> {
+fn start_runtime(
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeProcess>,
+) -> Result<String, String> {
     if runtime_is_listening() {
         return Ok("already-running".into());
     }
@@ -203,7 +206,11 @@ fn stop_runtime(state: State<'_, RuntimeProcess>) -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .manage(RuntimeProcess::new())
-        .invoke_handler(tauri::generate_handler![start_runtime, runtime_status, stop_runtime])
+        .invoke_handler(tauri::generate_handler![
+            start_runtime,
+            runtime_status,
+            stop_runtime
+        ])
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
