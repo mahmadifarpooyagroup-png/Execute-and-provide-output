@@ -24,12 +24,13 @@ class PermissionLevel(IntEnum):
 
 
 class ExecutionAction(BaseModel):
-    action_id: str
+    action_id: str = Field(min_length=1, max_length=256)
     permission_required: PermissionLevel
     execution_target: ExecutionTarget
-    arguments: List[str] = Field(default_factory=list)
-    timeout_seconds: int = 30
-    working_dir: Optional[str] = None
+    arguments: List[str] = Field(default_factory=list, max_length=256)
+    timeout_seconds: int = Field(default=30, ge=1, le=3600)
+    max_output_bytes: int = Field(default=1_048_576, ge=1024, le=10_485_760)
+    working_dir: Optional[str] = Field(default=None, max_length=4096)
 
 
 class ExecutionResult(BaseModel):
