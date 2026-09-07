@@ -24,7 +24,7 @@ class WorkflowController(Protocol):
 
 
 class ExternalStateVerifier(Protocol):
-    async def verify_action(self, idempotency_key: str) -> str: ...
+    async def verify_action(self, idempotency_key: str, *, operation_id: str | None = None) -> str: ...
 
 
 @dataclass(frozen=True)
@@ -36,7 +36,7 @@ class ResumeResult:
 
 
 class SQLiteCheckpointStore:
-    """Durably stores the complete checkpoint payload without dropping extensions."""
+    """Durably stores complete checkpoint payloads with monotonic revisions."""
 
     def __init__(self, database: AtrinDatabase):
         self.database = database
@@ -68,22 +68,24 @@ class SQLiteCheckpointStore:
             existing = connection.execute(
                 "SELECT revision FROM workflow_checkpoints WHERE workflow_id=?", (workflow_id,)
             ).fetchone()
+            now = datetime.now(timezone.utc).isoformat()
             if existing is None:
                 revision = 1
+                payload["revision"] = revision
                 connection.execute(
                     "INSERT INTO workflow_checkpoints(workflow_id,checkpoint_version,revision,payload,updated_at) "
                     "VALUES (?,?,?,?,?)",
-                    (workflow_id, version, revision, json.dumps(payload, separators=(",", ":"), sort_keys=True),
-                     datetime.now(timezone.utc).isoformat()),
+                    (workflow_id, version, revision, json.dumps(payload, separators=(",", ":"), sort_keys=True), now),
                 )
             else:
                 current = int(existing["revision"])
                 revision = current + 1
+                payload["revision"] = revision
                 cursor = connection.execute(
                     "UPDATE workflow_checkpoints SET checkpoint_version=?, revision=?, payload=?, updated_at=? "
                     "WHERE workflow_id=? AND revision=?",
                     (version, revision, json.dumps(payload, separators=(",", ":"), sort_keys=True),
-                     datetime.now(timezone.utc).isoformat(), workflow_id, current),
+                     now, workflow_id, current),
                 )
                 if cursor.rowcount != 1:
                     raise RuntimeError("Checkpoint revision conflict")
@@ -128,6 +130,17 @@ async def _call(method: Any, *args: Any, **kwargs: Any) -> Any:
     return await result if inspect.isawaitable(result) else result
 
 
+def _supports_keyword(method: Any, name: str) -> bool:
+    try:
+        parameters = inspect.signature(method).parameters.values()
+    except (TypeError, ValueError):
+        return True
+    return any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == name
+        for parameter in parameters
+    )
+
+
 class RecoveryEngine:
     def __init__(self, checkpoint_store: CheckpointStore, workflow_controller: WorkflowController,
                  external_state_verifier: ExternalStateVerifier | None = None):
@@ -158,12 +171,15 @@ class RecoveryEngine:
             raise LookupError(f"No checkpoint found for workflow {workflow_id}")
 
         action_key = checkpoint.get("action_idempotency_key")
+        operation_id = checkpoint.get("operation_id")
         if action_key and self.external_state_verifier is None:
             raise RuntimeError("An external state verifier is required for side-effecting actions")
 
         status = "NOT_STARTED"
         if action_key:
-            status = str(await _call(self.external_state_verifier.verify_action, action_key)).upper()
+            verifier = self.external_state_verifier.verify_action
+            kwargs = {"operation_id": operation_id} if _supports_keyword(verifier, "operation_id") else {}
+            status = str(await _call(verifier, action_key, **kwargs)).upper()
 
         if status == "CONFIRMED":
             await _call(self.workflow_controller.resume_workflow, workflow_id, checkpoint, skip_action=True)
