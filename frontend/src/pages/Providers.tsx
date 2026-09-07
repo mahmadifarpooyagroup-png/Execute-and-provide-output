@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { createProviderProfile, getProviderCatalog, type RuntimeProviderCatalogItem } from '../services/api'
 import { useAppStore } from '../store/appStore'
@@ -16,7 +16,7 @@ export function ProvidersPage() {
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
 
-  const loadCatalog = async () => {
+  const loadCatalog = useCallback(async () => {
     setCatalogLoading(true)
     setCatalogError(null)
     try {
@@ -28,12 +28,12 @@ export function ProvidersPage() {
     } finally {
       setCatalogLoading(false)
     }
-  }
+  }, [providerId])
 
   useEffect(() => {
     void loadProviders().catch(() => undefined)
     void loadCatalog()
-  }, [loadProviders])
+  }, [loadCatalog, loadProviders])
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -105,7 +105,7 @@ export function ProvidersPage() {
             <div key={provider.id} className="row-item provider-row">
               <div>
                 <div className="row-title">{provider.name}</div>
-                <div className="muted">{provider.type} · {provider.account_id}</div>
+                <div className="muted">{provider.type} · {provider.accountId}</div>
                 <div className="muted">{provider.id}</div>
               </div>
               <div className="row-meta">
