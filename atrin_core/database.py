@@ -5,9 +5,9 @@ import sqlite3
 
 
 class AtrinDatabase:
-    """SQLite persistence with per-connection safety pragmas and forward migrations."""
+    """SQLite persistence with per-connection safety pragmas and additive migrations."""
 
-    CURRENT_SCHEMA_VERSION = 2
+    CURRENT_SCHEMA_VERSION = 3
 
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -33,6 +33,12 @@ class AtrinDatabase:
         if column not in cls._columns(conn, table):
             conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {definition}')
 
+    @staticmethod
+    def _check_identifier(value: str) -> str:
+        if not value.replace("_", "").isalnum() or not value:
+            raise ValueError(f"Invalid SQLite identifier: {value}")
+        return value
+
     def _create_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS idempotency_ledger (
@@ -40,6 +46,7 @@ class AtrinDatabase:
                 workflow_id TEXT NOT NULL,
                 step_id TEXT NOT NULL,
                 provider_id TEXT NOT NULL,
+                operation_id TEXT,
                 status TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 confirmed_at TIMESTAMP,
@@ -119,12 +126,14 @@ class AtrinDatabase:
                 action TEXT NOT NULL,
                 provider_id TEXT NOT NULL,
                 idempotency_key TEXT NOT NULL,
+                operation_id TEXT,
                 status TEXT NOT NULL DEFAULT 'PENDING',
                 result TEXT,
                 evidence TEXT,
                 order_index INTEGER NOT NULL,
                 provider_profile_id TEXT,
                 fencing_token INTEGER,
+                side_effecting INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY (task_id) REFERENCES tasks(task_id)
             )
         """)
@@ -162,15 +171,18 @@ class AtrinDatabase:
         """)
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
-        # Existing databases from v1 are upgraded in place. SQLite's
-        # CREATE TABLE IF NOT EXISTS does not add new columns, so each
-        # additive change must be explicit.
+        """Apply additive migrations while preserving existing databases."""
         self._add_column_if_missing(conn, "idempotency_ledger", "claim_owner", "TEXT")
         self._add_column_if_missing(
             conn, "idempotency_ledger", "attempt", "INTEGER NOT NULL DEFAULT 0"
         )
+        self._add_column_if_missing(conn, "idempotency_ledger", "operation_id", "TEXT")
         self._add_column_if_missing(conn, "steps", "provider_profile_id", "TEXT")
         self._add_column_if_missing(conn, "steps", "fencing_token", "INTEGER")
+        self._add_column_if_missing(conn, "steps", "operation_id", "TEXT")
+        self._add_column_if_missing(
+            conn, "steps", "side_effecting", "INTEGER NOT NULL DEFAULT 1"
+        )
         self._add_column_if_missing(
             conn, "workflow_checkpoints", "revision", "INTEGER NOT NULL DEFAULT 0"
         )
@@ -184,8 +196,16 @@ class AtrinDatabase:
             "ON idempotency_ledger(status, expires_at)"
         )
         conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_idempotency_operation "
+            "ON idempotency_ledger(operation_id)"
+        )
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_steps_workflow_order "
             "ON steps(task_id, order_index)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_steps_operation "
+            "ON steps(operation_id)"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_owner_expiry "
