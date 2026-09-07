@@ -159,7 +159,9 @@ class RecoveryEngine:
         """Finalize a provider-confirmed operation without redispatching it."""
         database = getattr(self.workflow_controller, "database", None)
         if not isinstance(database, AtrinDatabase):
-            raise RuntimeError("Durable workflow controller is required to finalize a verified operation")
+            database = getattr(self.checkpoint_store, "database", None)
+        if not isinstance(database, AtrinDatabase):
+            raise RuntimeError("A durable AtrinDatabase is required to finalize a verified operation")
         step_id = str(checkpoint.get("step_id") or "")
         key = str(checkpoint.get("action_idempotency_key") or "")
         if not step_id or not key:
@@ -213,17 +215,18 @@ class RecoveryEngine:
                             "operation_id": step["operation_id"], "revision": revision})
             version = int(payload.get("checkpoint_version", row["checkpoint_version"] if row else 1))
             serialized = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+            now = datetime.now(timezone.utc).isoformat()
             if row:
                 updated = connection.execute(
                     "UPDATE workflow_checkpoints SET checkpoint_version=?, revision=?, payload=?, updated_at=? WHERE workflow_id=? AND revision=?",
-                    (version, revision, serialized, datetime.now(timezone.utc).isoformat(), workflow_id, int(row["revision"])),
+                    (version, revision, serialized, now, workflow_id, int(row["revision"])),
                 )
                 if updated.rowcount != 1:
                     raise RuntimeError("Checkpoint revision conflict while finalizing recovery")
             else:
                 connection.execute(
                     "INSERT INTO workflow_checkpoints(workflow_id,checkpoint_version,revision,payload,updated_at) VALUES (?,?,?,?,?)",
-                    (workflow_id, version, revision, serialized, datetime.now(timezone.utc).isoformat()),
+                    (workflow_id, version, revision, serialized, now),
                 )
             audit = getattr(self.workflow_controller, "_audit", None)
             if callable(audit):
