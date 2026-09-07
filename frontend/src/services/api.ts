@@ -5,6 +5,7 @@ export interface RuntimeWorkflow {
   plan_version: number
   created_at: string
   updated_at: string
+  progress?: number
 }
 
 export interface RuntimeProvider {
