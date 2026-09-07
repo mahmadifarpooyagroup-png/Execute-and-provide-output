@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 from typing import Any, Dict, Optional
 
 import httpx
@@ -9,11 +10,9 @@ from .protocol_models import MCPConfig, ProtocolConnection, ProtocolType
 
 
 class MCPAdapter(IProviderAdapter):
-    """MCP protocol adapter for tool/resource access.
+    """MCP Streamable HTTP adapter for the stateless 2026-07-28 revision."""
 
-    The workflow engine remains vendor-neutral and does not depend on MCP lifecycle
-    state. MCP is treated as a tool/resource integration layer only.
-    """
+    PROTOCOL_VERSION = "2026-07-28"
 
     def __init__(
         self,
@@ -24,6 +23,7 @@ class MCPAdapter(IProviderAdapter):
     ) -> None:
         self.config = config
         self.timeout = timeout
+        self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=timeout)
         self.protocol_state = ProtocolConnection(
             protocol_type=ProtocolType.MCP,
@@ -33,29 +33,47 @@ class MCPAdapter(IProviderAdapter):
         )
         self.workflow_state = "IDLE"
         self._connected = False
+        self._request_ids = itertools.count(1)
+        self._last_operation_key: Optional[str] = None
+        self._last_operation_result: Optional[Dict[str, Any]] = None
 
-    def _url(self, suffix: str) -> str:
-        base = self.config.server_url.rstrip("/")
-        if suffix.startswith("http://") or suffix.startswith("https://"):
-            return suffix
-        return f"{base}{suffix if suffix.startswith('/') else '/' + suffix}"
+    def _url(self) -> str:
+        return self.config.server_url.rstrip("/")
 
-    async def connect(self) -> ProtocolConnection:
-        headers = {"Content-Type": "application/json"}
+    def _headers(self, method: str, name: str | None = None) -> Dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+            "MCP-Protocol-Version": self.PROTOCOL_VERSION,
+            "Mcp-Method": method,
+        }
+        if name:
+            headers["Mcp-Name"] = name
         if self.config.auth_token:
             headers["Authorization"] = f"Bearer {self.config.auth_token}"
+        return headers
 
+    async def connect(self) -> ProtocolConnection:
+        request_id = next(self._request_ids)
         payload = {
             "jsonrpc": "2.0",
-            "method": "initialize",
+            "id": request_id,
+            "method": "server/discover",
             "params": {
-                "protocolVersion": "2026-07-28",
-                "capabilities": {"tools": True, "resources": True},
-                "clientInfo": {"name": "atrin-core", "version": "0.1.0"},
+                "_meta": {
+                    "io.modelcontextprotocol/clientInfo": {
+                        "name": "atrin-core",
+                        "version": "0.1.0",
+                    }
+                }
             },
         }
-        response = await self._client.post(self._url("/mcp"), json=payload, headers=headers)
+        response = await self._client.post(
+            self._url(), json=payload, headers=self._headers("server/discover")
+        )
         response.raise_for_status()
+        data = response.json()
+        if isinstance(data, dict) and "error" in data:
+            raise RuntimeError(f"MCP server/discover failed: {data['error']}")
         self._connected = True
         self.protocol_state.state = "CONNECTED"
         self.protocol_state.health = "HEALTHY"
@@ -63,42 +81,60 @@ class MCPAdapter(IProviderAdapter):
 
     async def list_tools(self) -> Dict[str, Any]:
         await self._ensure_connected()
-        response = await self._client.get(self._url("/mcp/tools"))
-        response.raise_for_status()
-        payload = response.json()
-        if isinstance(payload, dict):
-            return payload
-        return {"tools": payload}
+        response = await self._rpc("tools/list", params={})
+        result = response.get("result", response)
+        return result if isinstance(result, dict) else {"tools": result}
 
-    async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        *,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
         await self._ensure_connected()
-        response = await self._client.post(
-            self._url("/mcp/call"),
-            json={"tool": tool_name, "arguments": arguments},
+        response = await self._rpc(
+            "tools/call",
+            params={"name": tool_name, "arguments": arguments},
+            name=tool_name,
         )
-        response.raise_for_status()
-        result = response.json()
-        if isinstance(result, dict):
-            return result
-        return {"result": result}
+        result = response.get("result", response)
+        normalized = result if isinstance(result, dict) else {"result": result}
+        self._last_operation_key = idempotency_key
+        self._last_operation_result = normalized
+        return normalized
+
+    async def execute(self, action: str, idempotency_key: str, *, fencing_token: int | None = None) -> Dict[str, Any]:
+        if fencing_token is None and self.config.auth_token:
+            pass
+        return await self.call_tool(action, {}, idempotency_key=idempotency_key)
+
+    async def verify_action(self, idempotency_key: str) -> str:
+        if self._last_operation_key != idempotency_key:
+            return "AMBIGUOUS"
+        return "CONFIRMED" if self._last_operation_result is not None else "AMBIGUOUS"
 
     async def disconnect(self) -> None:
-        if not self._connected:
-            return
-        try:
-            await self._client.post(self._url("/mcp/disconnect"), json={})
-        except Exception:
-            pass
         self._connected = False
         self.protocol_state.state = "DISCONNECTED"
         self.protocol_state.health = "OFFLINE"
+        if self._owns_client:
+            await self._client.aclose()
 
-    async def verify_action(self, idempotency_key: str) -> str:
-        if self._connected and self.protocol_state.state == "CONNECTED":
-            return "CONFIRMED"
-        return "NOT_STARTED"
+    async def _rpc(self, method: str, *, params: Dict[str, Any], name: str | None = None) -> Dict[str, Any]:
+        request_id = next(self._request_ids)
+        payload = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+        response = await self._client.post(
+            self._url(), json=payload, headers=self._headers(method, name)
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise RuntimeError("Invalid MCP JSON-RPC response")
+        if "error" in data:
+            raise RuntimeError(f"MCP {method} failed: {data['error']}")
+        return data
 
     async def _ensure_connected(self) -> None:
-        if self._connected:
-            return
-        await self.connect()
+        if not self._connected:
+            await self.connect()
