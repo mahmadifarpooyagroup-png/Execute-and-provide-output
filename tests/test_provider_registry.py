@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -48,12 +49,10 @@ def test_registry_can_load_json_file(tmp_path, monkeypatch):
 def test_profile_aware_adapter_resolves_profile_from_durable_step(tmp_path):
     database = AtrinDatabase(str(tmp_path / "atrin.db"))
     registry = ProviderAdapterRegistry()
-    provider = registry.register({"id": "p1", "adapter_id": "openai-compatible", "endpoint": "http://127.0.0.1:9000"})
-
-    created = []
+    created: list[tuple[str, str]] = []
 
     def fake_factory(current_provider, profile_id):
-        created.append((current_provider.id, profile_id))
+        created.append((current_provider.id, profile_id or ""))
         return _FakeAdapter()
 
     ProviderAdapterRegistry.register_factory("test-profile-aware", fake_factory)
@@ -71,7 +70,7 @@ def test_profile_aware_adapter_resolves_profile_from_durable_step(tmp_path):
         connection.close()
 
     adapters = registry.build_adapters(database)
-    result = __import__('asyncio').run(adapters[provider.id].execute("do", "k1", operation_id="op1"))
+    result = asyncio.run(adapters[provider.id].execute("do", "k1", operation_id="op1"))
     assert result["result"] == "ok"
     assert created == [("p-test", "profile-42")]
 
