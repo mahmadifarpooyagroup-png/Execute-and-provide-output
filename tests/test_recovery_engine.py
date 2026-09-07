@@ -27,9 +27,24 @@ class MockVerifier:
         return self.status
 
 
+def make_store(temporary_directory, workflow_id):
+    database = AtrinDatabase(os.path.join(temporary_directory, "test.db"))
+    connection = database.get_connection()
+    try:
+        connection.execute(
+            "INSERT INTO workflows(workflow_id, goal, state) VALUES (?, ?, ?)",
+            (workflow_id, "recovery test", "RECOVERING"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return SQLiteCheckpointStore(database)
+
+
 def test_pause_handlers_persist_distinct_waiting_states():
     with tempfile.TemporaryDirectory() as temporary_directory:
-        store = SQLiteCheckpointStore(AtrinDatabase(os.path.join(temporary_directory, "test.db")))
+        store = make_store(temporary_directory, "wf-1")
+        make_store(temporary_directory, "wf-2")
         controller = MockController()
         engine = RecoveryEngine(store, controller)
         checkpoint = {"step_id": "step-1", "checkpoint_version": 1}
@@ -44,7 +59,7 @@ def test_pause_handlers_persist_distinct_waiting_states():
 
 def test_resume_skips_confirmed_side_effect():
     with tempfile.TemporaryDirectory() as temporary_directory:
-        store = SQLiteCheckpointStore(AtrinDatabase(os.path.join(temporary_directory, "test.db")))
+        store = make_store(temporary_directory, "wf-1")
         controller = MockController()
         verifier = MockVerifier("CONFIRMED")
         engine = RecoveryEngine(store, controller, verifier)
@@ -59,7 +74,7 @@ def test_resume_skips_confirmed_side_effect():
 
 def test_resume_does_not_dispatch_while_action_is_in_progress():
     with tempfile.TemporaryDirectory() as temporary_directory:
-        store = SQLiteCheckpointStore(AtrinDatabase(os.path.join(temporary_directory, "test.db")))
+        store = make_store(temporary_directory, "wf-1")
         controller = MockController()
         engine = RecoveryEngine(store, controller, MockVerifier("IN_PROGRESS"))
         asyncio.run(store.save("wf-1", {"action_idempotency_key": "action-1"}))
