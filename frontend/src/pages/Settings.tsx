@@ -5,7 +5,7 @@ import { useAppStore } from '../store/appStore'
 
 export function SettingsPage() {
   const { t } = useTranslation()
-  const { settings, loadSettings } = useAppStore()
+  const { settings, loadSettings, saveSettings } = useAppStore()
   const [token, setToken] = useState(() => getRuntimeToken() ?? '')
   const [saved, setSaved] = useState(false)
 
@@ -14,13 +14,14 @@ export function SettingsPage() {
   }, [loadSettings])
 
   const saveToken = () => {
-    if (token.trim()) {
-      setRuntimeToken(token.trim())
-    } else {
-      clearRuntimeToken()
-    }
+    if (token.trim()) setRuntimeToken(token.trim())
+    else clearRuntimeToken()
     setSaved(true)
     window.setTimeout(() => setSaved(false), 2000)
+  }
+
+  const updateSetting = <K extends keyof typeof settings>(key: K, value: (typeof settings)[K]) => {
+    saveSettings({ ...settings, [key]: value })
   }
 
   return (
@@ -46,19 +47,44 @@ export function SettingsPage() {
         </div>
         <div className="setting-row">
           <span>{t('theme')}</span>
-          <strong>{settings.theme}</strong>
+          <select
+            className="setting-input"
+            value={settings.theme}
+            onChange={(event) => updateSetting('theme', event.target.value === 'light' ? 'light' : 'dark')}
+          >
+            <option value="dark">dark</option>
+            <option value="light">light</option>
+          </select>
         </div>
         <div className="setting-row">
           <span>{t('auto_recovery')}</span>
-          <strong>{settings.autoRecover ? t('enabled') : t('disabled')}</strong>
+          <input
+            type="checkbox"
+            checked={settings.autoRecover}
+            onChange={(event) => updateSetting('autoRecover', event.target.checked)}
+            aria-label={t('auto_recovery')}
+          />
         </div>
         <div className="setting-row">
           <span>{t('retention_period')}</span>
-          <strong>{settings.retentionDays} {t('days')}</strong>
+          <input
+            className="setting-input"
+            type="number"
+            min={1}
+            max={3650}
+            value={settings.retentionDays}
+            onChange={(event) => updateSetting('retentionDays', Number(event.target.value))}
+          />
+          <span className="muted">{t('days')}</span>
         </div>
         <div className="setting-row">
           <span>{t('notifications')}</span>
-          <strong>{settings.notifications ? t('enabled') : t('disabled')}</strong>
+          <input
+            type="checkbox"
+            checked={settings.notifications}
+            onChange={(event) => updateSetting('notifications', event.target.checked)}
+            aria-label={t('notifications')}
+          />
         </div>
       </div>
     </section>
