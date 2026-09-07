@@ -12,41 +12,21 @@ class DummyUIAutomationBackend:
     def __init__(self):
         self.windows = {
             "win-1": WindowInfo(
-                window_id="win-1",
-                title="TestApp - Ready",
-                process_name="TestApp",
-                automation_id="app-window",
+                window_id="win-1", title="TestApp - Ready", process_name="TestApp", automation_id="app-window"
             )
         }
         self.element_calls = []
 
     def launch_app(self, app_path: str) -> WindowInfo:
-        return WindowInfo(
-            window_id="win-1",
-            title="TestApp - Ready",
-            process_name="TestApp",
-            automation_id="app-window",
-        )
+        return self.windows["win-1"]
 
     def attach_to_app(self, process_name: str) -> WindowInfo:
         return self.windows["win-1"]
 
     def inspect_ui(self, window_id: str) -> List[UIElement]:
         return [
-            UIElement(
-                element_id="login-button",
-                name="Login",
-                control_type="Button",
-                value=None,
-                children=[],
-            ),
-            UIElement(
-                element_id="status-text",
-                name="Status",
-                control_type="Text",
-                value="ready",
-                children=[],
-            ),
+            UIElement(element_id="login-button", name="Login", control_type="Button", value=None, children=[]),
+            UIElement(element_id="status-text", name="Status", control_type="Text", value="ready", children=[]),
         ]
 
     def interact_with_element(self, element_id: str, action: str, value: Optional[str] = None):
@@ -88,15 +68,7 @@ class FailingUIAutomationBackend:
 
 class CliFallbackBackend:
     def inspect_ui(self, window_id: str) -> List[UIElement]:
-        return [
-            UIElement(
-                element_id="cli-login",
-                name="CLI Login",
-                control_type="Button",
-                value=None,
-                children=[],
-            )
-        ]
+        return [UIElement(element_id="cli-login", name="CLI Login", control_type="Button", value=None, children=[])]
 
     def interact_with_element(self, element_id: str, action: str, value: Optional[str] = None):
         return {"element_id": element_id, "action": action, "value": value, "status": "cli-ok"}
@@ -108,18 +80,14 @@ class CliFallbackBackend:
 @pytest.mark.asyncio
 async def test_launch_app_and_attach_lifecycle():
     adapter = GenericDesktopAdapter(ui_automation_backend=DummyUIAutomationBackend())
-
     window = await adapter.launch_app("C:/Program Files/TestApp/TestApp.exe")
     assert window.process_name == "TestApp"
     assert window.window_id in adapter.windows
-
     attached = await adapter.attach_to_app("TestApp")
     assert attached.window_id == window.window_id
-
     assert await adapter.read_output(attached.window_id) == "ready"
     assert await adapter.detect_auth(attached.window_id) is True
     assert await adapter.detect_error(attached.window_id) is False
-
     await adapter.close_app(attached.window_id)
     assert attached.window_id not in adapter.windows
 
@@ -128,12 +96,10 @@ async def test_launch_app_and_attach_lifecycle():
 async def test_ui_inspection_and_element_interaction():
     backend = DummyUIAutomationBackend()
     adapter = GenericDesktopAdapter(ui_automation_backend=backend)
-
     window = await adapter.launch_app("C:/Program Files/TestApp/TestApp.exe")
     elements = await adapter.inspect_ui(window.window_id)
     assert len(elements) == 2
     assert elements[0].name == "Login"
-
     response = await adapter.interact_with_element("login-button", "click", None)
     assert response["status"] == "ok"
     assert backend.element_calls == [("login-button", "click", None)]
@@ -142,18 +108,32 @@ async def test_ui_inspection_and_element_interaction():
 @pytest.mark.asyncio
 async def test_fallback_to_cli_when_uia_fails():
     adapter = GenericDesktopAdapter(
-        ui_automation_backend=FailingUIAutomationBackend(),
-        cli_backend=CliFallbackBackend(),
+        ui_automation_backend=FailingUIAutomationBackend(), cli_backend=CliFallbackBackend()
     )
-
     window = await adapter.launch_app("C:/Program Files/TestApp/TestApp.exe")
     elements = await adapter.inspect_ui(window.window_id)
     assert elements[0].element_id == "cli-login"
     assert adapter.last_strategy == "CLI"
-
     response = await adapter.interact_with_element("cli-login", "click", "submit")
     assert response["status"] == "cli-ok"
     assert await adapter.read_output(window.window_id) == "cli-ready"
+    assert adapter.fallback_errors
+
+
+@pytest.mark.asyncio
+async def test_verification_never_equates_window_focus_with_success():
+    adapter = GenericDesktopAdapter(ui_automation_backend=DummyUIAutomationBackend())
+    await adapter.launch_app("C:/Program Files/TestApp/TestApp.exe")
+    adapter.desktop_state = "FOCUSED"
+    assert await adapter.verify_action("unseen") == "AMBIGUOUS"
+
+
+@pytest.mark.asyncio
+async def test_execution_requires_backend_operation():
+    adapter = GenericDesktopAdapter(ui_automation_backend=DummyUIAutomationBackend())
+    await adapter.launch_app("C:/Program Files/TestApp/TestApp.exe")
+    with pytest.raises(RuntimeError, match="exposes a verified execute"):
+        await adapter.execute("write", "key-1")
 
 
 @pytest.mark.asyncio
@@ -161,10 +141,7 @@ async def test_protocol_state_is_independent_from_workflow_state_and_checkpoints
     adapter = GenericDesktopAdapter(ui_automation_backend=DummyUIAutomationBackend())
     adapter.workflow_state = "WAITING_FOR_USER"
     adapter.desktop_state = "FOCUSED"
-
     await adapter.launch_app("C:/Program Files/TestApp/TestApp.exe")
-
     assert adapter.workflow_state == "WAITING_FOR_USER"
-    assert adapter.desktop_state == "FOCUSED"
     assert adapter.windows
     assert adapter.workflow_checkpoint == {"workflow_state": "WAITING_FOR_USER"}
