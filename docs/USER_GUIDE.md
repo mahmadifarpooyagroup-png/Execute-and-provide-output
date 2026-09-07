@@ -70,7 +70,7 @@ Set `ATRIN_PROVIDERS_JSON` or `ATRIN_PROVIDERS_FILE` before starting the runtime
 Example:
 
 ```bash
-export ATRIN_PROVIDERS_JSON='[{"id":"my-api","name":"My API","adapter_id":"openai-compatible","connection_kind":"API","endpoint":"https://example.invalid/v1","metadata":{"api":{"model":"my-model","api_key_env":"MY_API_KEY"},"capabilities":["chat"]}}]'
+export ATRIN_PROVIDERS_JSON='[{"id":"my-api","name":"My API","adapter_id":"chat-completions","connection_kind":"API","endpoint":"https://example.invalid/v1","metadata":{"api":{"model":"my-model","api_key_env":"MY_API_KEY"},"capabilities":["chat"]}}]'
 export MY_API_KEY='replace-me'
 ```
 
@@ -81,7 +81,7 @@ For browser providers, configure `metadata.web` selectors and optionally a persi
 Start the local backend from the repository root:
 
 ```bash
-uvicorn atrin_core.runtime:app --host 127.0.0.1 --port 8765
+uvicorn atrin_core.runtime:create_app --factory --host 127.0.0.1 --port 8765
 ```
 
 In a second terminal, start the frontend:
