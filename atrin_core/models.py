@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
+
 class ConnectionKind(str, Enum):
     WEB = "WEB"
     DESKTOP = "DESKTOP"
@@ -13,6 +14,7 @@ class ConnectionKind(str, Enum):
     MCP = "MCP"
     A2A = "A2A"
     ACP = "ACP"
+
 
 class AuthState(str, Enum):
     UNKNOWN = "UNKNOWN"
@@ -27,6 +29,7 @@ class AuthState(str, Enum):
     NETWORK_UNAVAILABLE = "NETWORK_UNAVAILABLE"
     WAITING_FOR_AUTH = "WAITING_FOR_AUTH"
     WAITING_FOR_HUMAN_INTERACTION = "WAITING_FOR_HUMAN_INTERACTION"
+
 
 class WorkflowState(str, Enum):
     IDLE = "IDLE"
@@ -58,6 +61,8 @@ class Step(BaseModel):
     status: str = "PENDING"
     result: Optional[str] = None
     evidence: Optional[str] = None
+    provider_profile_id: Optional[str] = None
+    fencing_token: Optional[int] = None
 
 
 class Task(BaseModel):
@@ -65,6 +70,7 @@ class Task(BaseModel):
     description: str
     steps: List[Step] = Field(default_factory=list)
     status: str = "PENDING"
+
 
 class Provider(BaseModel):
     id: str
@@ -124,6 +130,7 @@ class Provider(BaseModel):
             version=config.get("version"),
         )
 
+
 class ProviderProfile(BaseModel):
     id: str
     provider_id: str
@@ -131,6 +138,7 @@ class ProviderProfile(BaseModel):
     name: str
     auth_state: AuthState = AuthState.UNKNOWN
     fencing_token: int = 0
+
 
 class Session(BaseModel):
     session_id: str
@@ -141,10 +149,12 @@ class Session(BaseModel):
     lease_expiry: Optional[datetime] = None
     fencing_token: int = 0
 
+
 class SyncDirection(str, Enum):
     PUSH = "PUSH"
     PULL = "PULL"
     CONFLICT = "CONFLICT"
+
 
 class SyncConfig(BaseModel):
     provider_type: str
@@ -153,11 +163,13 @@ class SyncConfig(BaseModel):
     path: Optional[str] = None
     encryption_key_hash: str
 
+
 class SyncStatus(BaseModel):
     last_synced_at: Optional[datetime] = None
     sync_direction: SyncDirection
     remote_version: Optional[str] = None
     local_version: Optional[str] = None
+
 
 class IdempotencyRecord(BaseModel):
     idempotency_key: str
