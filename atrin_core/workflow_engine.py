@@ -158,13 +158,9 @@ class WorkflowEngine:
                          step.provider_profile_id, step.fencing_token),
                     )
             self._checkpoint(connection, workflow_id, {
-                "workflow_id": workflow_id,
-                "state": WorkflowState.IDLE.value,
-                "goal": goal,
-                "plan_version": 1,
-                "completed_tasks": [],
-                "pending_tasks": [task.task_id for task in plan],
-                "failed_tasks": [],
+                "workflow_id": workflow_id, "state": WorkflowState.IDLE.value,
+                "goal": goal, "plan_version": 1,
+                "completed_tasks": [], "pending_tasks": [task.task_id for task in plan], "failed_tasks": [],
             })
             self._audit(connection, workflow_id, "WORKFLOW_CREATED", "workflow-engine",
                         {"goal": goal, "task_count": len(plan)})
@@ -204,8 +200,6 @@ class WorkflowEngine:
             raise LookupError(f"Workflow not found: {workflow_id}")
         if workflow["state"] == WorkflowState.CANCELLED.value:
             raise RuntimeError("Workflow is cancelled")
-        if workflow["state"] == WorkflowState.COMPLETED.value:
-            raise RuntimeError("Workflow is already completed")
         previous_task = connection.execute("""
             SELECT task_id FROM tasks
             WHERE workflow_id=? AND order_index<? AND status!='COMPLETED'
@@ -231,8 +225,8 @@ class WorkflowEngine:
             step = self._step(connection, workflow_id, step_id)
             connection.execute("UPDATE steps SET status='CONFIRMED' WHERE step_id=?", (step_id,))
             connection.execute(
-                "UPDATE idempotency_ledger SET status='CONFIRMED', confirmed_at=CURRENT_TIMESTAMP, "
-                "expires_at=NULL, claim_owner=NULL WHERE idempotency_key=? AND workflow_id=? AND step_id=?",
+                "UPDATE idempotency_ledger SET status='CONFIRMED', confirmed_at=CURRENT_TIMESTAMP, expires_at=NULL, claim_owner=NULL "
+                "WHERE idempotency_key=? AND workflow_id=? AND step_id=?",
                 (key, workflow_id, step_id),
             )
             connection.execute(
@@ -263,15 +257,16 @@ class WorkflowEngine:
             connection.close()
 
     async def execute_step(self, workflow_id: str, step_id: str) -> Any:
+        # Read and handle confirmed idempotency before checking terminal workflow
+        # state: replaying a confirmed step must remain a safe read operation.
         connection = self.database.get_connection()
         verify_before_claim = False
-        key = None
+        key: str
         adapter: ActionAdapter
         step: Any
         try:
             connection.execute("BEGIN IMMEDIATE")
             step = self._step(connection, workflow_id, step_id)
-            self._assert_step_runnable(connection, workflow_id, step)
             adapter = self.adapters.get(step["provider_id"])
             if adapter is None:
                 raise LookupError(f"No adapter registered for provider: {step['provider_id']}")
@@ -291,6 +286,7 @@ class WorkflowEngine:
                 ).fetchone()
                 connection.commit()
                 return {"result": existing["result"], "evidence": existing["evidence"]}
+            self._assert_step_runnable(connection, workflow_id, step)
             if ledger and ledger["status"] == "IN_PROGRESS":
                 expiry = self._parse_expiry(ledger["expires_at"])
                 if expiry and expiry > self._now():
@@ -330,6 +326,7 @@ class WorkflowEngine:
                 or ledger["provider_id"] != step["provider_id"]
             ):
                 raise RuntimeError(f"Idempotency key collision: {step['idempotency_key']}")
+            now = self._now()
             if ledger is None:
                 connection.execute(
                     "INSERT INTO idempotency_ledger "
@@ -347,12 +344,23 @@ class WorkflowEngine:
                     raise RuntimeError("Workflow step is already claimed")
             elif ledger["status"] == "IN_PROGRESS":
                 expiry = self._parse_expiry(ledger["expires_at"])
-                if expiry and expiry > self._now():
+                if expiry and expiry > now:
                     raise RuntimeError("Workflow step is already claimed by another execution")
+                if expiry is None or expiry > now:
+                    raise RuntimeError("Workflow step has no reclaimable lease")
+                verified = await self._verify_existing_action(adapter, step["idempotency_key"])
+                if verified == "CONFIRMED":
+                    connection.rollback()
+                    return await self._finalize_verified_action(workflow_id, step_id, step["idempotency_key"])
+                if verified not in {"NOT_STARTED", "FAILED"}:
+                    connection.rollback()
+                    self._mark_ambiguous(workflow_id, step_id, step["idempotency_key"],
+                                         f"Verifier returned {verified} for expired claim")
+                    raise RuntimeError("External action state is ambiguous; workflow paused for recovery")
                 cursor = connection.execute(
                     "UPDATE idempotency_ledger SET status='IN_PROGRESS', expires_at=?, claim_owner=?, attempt=attempt+1 "
                     "WHERE idempotency_key=? AND workflow_id=? AND step_id=? AND status='IN_PROGRESS' AND expires_at<=?",
-                    (expires, claim_owner, step["idempotency_key"], workflow_id, step_id, self._now().isoformat()),
+                    (expires, claim_owner, step["idempotency_key"], workflow_id, step_id, now.isoformat()),
                 )
                 if cursor.rowcount != 1:
                     raise RuntimeError("Expired workflow claim could not be reclaimed")
@@ -364,10 +372,10 @@ class WorkflowEngine:
             )
             connection.execute("UPDATE steps SET status='EXECUTING' WHERE step_id=?", (step_id,))
             self._checkpoint(connection, workflow_id, {
-                "task_id": step["task_id"], "step_id": step_id,
-                "state": WorkflowState.EXECUTING.value, "current_action": step["action"],
-                "provider_id": step["provider_id"], "action_idempotency_key": step["idempotency_key"],
-                "claim_owner": claim_owner, "last_result": None, "evidence": None, "checkpoint_version": 1,
+                "task_id": step["task_id"], "step_id": step_id, "state": WorkflowState.EXECUTING.value,
+                "current_action": step["action"], "provider_id": step["provider_id"],
+                "action_idempotency_key": step["idempotency_key"], "claim_owner": claim_owner,
+                "last_result": None, "evidence": None, "checkpoint_version": 1,
             })
             self._audit(connection, workflow_id, "ACTION_CLAIMED", "workflow-engine",
                         {"step_id": step_id, "idempotency_key": step["idempotency_key"], "claim_owner": claim_owner})
@@ -388,8 +396,6 @@ class WorkflowEngine:
                         profile_id, workflow_id, int(step["fencing_token"])
                     ):
                         raise PermissionError("Execution lease is missing, expired, or fenced")
-            # If a fencing token is present, the adapter must accept it. Never
-            # silently retry without the token because that would bypass fencing.
             result = await _call(adapter.execute, step["action"], key, **kwargs)
             evidence = result.get("evidence") if isinstance(result, dict) else None
             result_value = result.get("result", result) if isinstance(result, dict) else result
@@ -427,8 +433,8 @@ class WorkflowEngine:
                     (str(result_value), evidence, step_id),
                 )
                 connection.execute(
-                    "UPDATE idempotency_ledger SET status='CONFIRMED', confirmed_at=CURRENT_TIMESTAMP, "
-                    "expires_at=NULL, claim_owner=NULL WHERE idempotency_key=? AND workflow_id=? AND step_id=? AND claim_owner=?",
+                    "UPDATE idempotency_ledger SET status='CONFIRMED', confirmed_at=CURRENT_TIMESTAMP, expires_at=NULL, claim_owner=NULL "
+                    "WHERE idempotency_key=? AND workflow_id=? AND step_id=? AND claim_owner=?",
                     (key, workflow_id, step_id, claim_owner),
                 )
                 task_counts = connection.execute(
@@ -461,9 +467,11 @@ class WorkflowEngine:
                 (next_state.value, workflow_id),
             )
             checkpoint = self._load_in_connection(connection, workflow_id) or {"workflow_id": workflow_id}
-            checkpoint.update({"task_id": step["task_id"], "step_id": step_id, "state": next_state.value,
-                               "current_action": step["action"], "provider_id": step["provider_id"],
-                               "action_idempotency_key": key, "last_result": str(result_value), "evidence": evidence})
+            checkpoint.update({
+                "task_id": step["task_id"], "step_id": step_id, "state": next_state.value,
+                "current_action": step["action"], "provider_id": step["provider_id"],
+                "action_idempotency_key": key, "last_result": str(result_value), "evidence": evidence,
+            })
             self._checkpoint(connection, workflow_id, checkpoint)
             connection.commit()
         except Exception:
@@ -475,31 +483,6 @@ class WorkflowEngine:
         if status == "AMBIGUOUS":
             raise RuntimeError("External action result is ambiguous; workflow paused for recovery")
         return result
-
-    def _mark_ambiguous(self, workflow_id: str, step_id: str, key: str, reason: str) -> None:
-        connection = self.database.get_connection()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                "UPDATE idempotency_ledger SET status='AMBIGUOUS', expires_at=NULL, claim_owner=NULL "
-                "WHERE idempotency_key=? AND workflow_id=? AND step_id=?", (key, workflow_id, step_id)
-            )
-            connection.execute(
-                "UPDATE workflows SET state=?, updated_at=CURRENT_TIMESTAMP WHERE workflow_id=?",
-                (WorkflowState.WAITING_FOR_PROVIDER.value, workflow_id),
-            )
-            checkpoint = self._load_in_connection(connection, workflow_id) or {"workflow_id": workflow_id}
-            checkpoint.update({"state": WorkflowState.WAITING_FOR_PROVIDER.value, "waiting_reason": reason,
-                               "step_id": step_id, "action_idempotency_key": key})
-            self._checkpoint(connection, workflow_id, checkpoint)
-            self._audit(connection, workflow_id, "ACTION_AMBIGUOUS", "workflow-engine",
-                        {"step_id": step_id, "idempotency_key": key, "reason": reason})
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
 
     async def pause_and_checkpoint(self, workflow_id: str, reason: str, checkpoint: Mapping[str, Any]) -> dict[str, Any]:
         normalized = reason.lower()
@@ -560,9 +543,8 @@ class WorkflowEngine:
             adapter = self.adapters.get(checkpoint.get("provider_id"))
             if adapter is None:
                 raise LookupError(f"No adapter registered for provider: {checkpoint.get('provider_id')}")
-            recovery_engine = RecoveryEngine(
-                checkpoint_store=self, workflow_controller=self, external_state_verifier=adapter
-            )
+            recovery_engine = RecoveryEngine(checkpoint_store=self, workflow_controller=self,
+                                             external_state_verifier=adapter)
             return await recovery_engine.resume_from_checkpoint(workflow_id)
 
         checkpoint = dict(checkpoint)
