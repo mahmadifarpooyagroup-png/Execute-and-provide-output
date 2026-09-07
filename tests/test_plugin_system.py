@@ -1,3 +1,8 @@
+import hashlib
+
+import pytest
+
+from atrin_core.database import AtrinDatabase
 from atrin_core.plugins.base import IPlugin
 from atrin_core.plugins.manager import PluginManager
 
@@ -20,17 +25,20 @@ def _write_plugin(path, source):
     path.write_text(source, encoding="utf-8")
 
 
-def test_plugin_registration_and_execution(tmp_path):
-    plugin_path = tmp_path / "mock_plugin.py"
-    _write_plugin(
-        plugin_path,
+def _valid_plugin_source(plugin_id="file-plugin"):
+    return (
         "from atrin_core.plugins.base import IPlugin\n\n"
         "class FilePlugin(IPlugin):\n"
-        "    def get_metadata(self): return {'plugin_id': 'file-plugin', 'name': 'File Plugin', 'version': '1.0'}\n"
+        f"    def get_metadata(self): return {{'plugin_id': '{plugin_id}', 'name': 'File Plugin', 'version': '1.0'}}\n"
         "    def initialize(self): return True\n"
         "    def execute(self, action, payload): return {'action': action, 'payload': payload}\n"
-        "    def cleanup(self): pass\n",
+        "    def cleanup(self): pass\n"
     )
+
+
+def test_plugin_registration_and_execution(tmp_path):
+    plugin_path = tmp_path / "mock_plugin.py"
+    _write_plugin(plugin_path, _valid_plugin_source())
     manager = PluginManager()
 
     assert manager.register_plugin(str(plugin_path)) == "file-plugin"
@@ -39,6 +47,46 @@ def test_plugin_registration_and_execution(tmp_path):
         "payload": {"ok": True},
     }
     assert manager.list_plugins()[0]["name"] == "File Plugin"
+    manager.cleanup()
+
+
+def test_plugin_registry_survives_manager_restart(tmp_path):
+    plugin_path = tmp_path / "persistent_plugin.py"
+    _write_plugin(plugin_path, _valid_plugin_source("persistent"))
+    database = AtrinDatabase(str(tmp_path / "atrin.db"))
+
+    manager = PluginManager(database=database)
+    assert manager.register_plugin(str(plugin_path)) == "persistent"
+    manager.cleanup()
+
+    restarted = PluginManager(database=database)
+    assert restarted.restore_plugins() == ["persistent"]
+    assert restarted.get_plugin("persistent").execute("ping", {})["action"] == "ping"
+    row = database.get_connection().execute(
+        "SELECT path, sha256, is_active FROM plugins_registry WHERE plugin_id=?", ("persistent",)
+    ).fetchone()
+    assert row["path"] == str(plugin_path.resolve())
+    assert row["sha256"] == hashlib.sha256(plugin_path.read_bytes()).hexdigest()
+    assert row["is_active"] == 1
+    restarted.cleanup()
+
+
+def test_plugin_registry_deactivates_modified_file(tmp_path):
+    plugin_path = tmp_path / "modified_plugin.py"
+    _write_plugin(plugin_path, _valid_plugin_source("modified"))
+    database = AtrinDatabase(str(tmp_path / "atrin.db"))
+
+    manager = PluginManager(database=database)
+    manager.register_plugin(str(plugin_path))
+    manager.cleanup()
+    plugin_path.write_text(_valid_plugin_source("modified") + "\n# changed\n", encoding="utf-8")
+
+    restarted = PluginManager(database=database)
+    assert restarted.restore_plugins() == []
+    row = database.get_connection().execute(
+        "SELECT is_active FROM plugins_registry WHERE plugin_id=?", ("modified",)
+    ).fetchone()
+    assert row["is_active"] == 0
 
 
 def test_plugin_without_contract_is_rejected(tmp_path):
@@ -46,12 +94,8 @@ def test_plugin_without_contract_is_rejected(tmp_path):
     _write_plugin(plugin_path, "class NotAPlugin: pass\n")
 
     manager = PluginManager()
-    try:
+    with pytest.raises(RuntimeError, match="IPlugin"):
         manager.register_plugin(str(plugin_path))
-    except TypeError as error:
-        assert "IPlugin" in str(error)
-    else:
-        raise AssertionError("Plugins without the IPlugin contract must be rejected")
 
 
 def test_blocked_plugin_import_is_rejected(tmp_path):
@@ -59,9 +103,5 @@ def test_blocked_plugin_import_is_rejected(tmp_path):
     _write_plugin(plugin_path, "import subprocess\n")
 
     manager = PluginManager()
-    try:
+    with pytest.raises(ValueError, match="not allowed"):
         manager.register_plugin(str(plugin_path))
-    except ValueError as error:
-        assert "not allowed" in str(error)
-    else:
-        raise AssertionError("Unsafe plugin imports must be rejected")
