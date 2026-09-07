@@ -125,7 +125,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     return payload as T
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new Error(`Runtime API request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`)
+      throw new Error(`Runtime API request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`, { cause: error })
     }
     throw error
   } finally {
@@ -205,7 +205,7 @@ export async function createWorkflow(input: {
           action: input.action,
           provider_id: input.providerId,
           provider_profile_id: input.providerProfileId ?? null,
-          side_effecting: input.sideEffecting ?? false,
+          side_effecting: input.sideEffecting ?? true,
         }],
       }],
     }),

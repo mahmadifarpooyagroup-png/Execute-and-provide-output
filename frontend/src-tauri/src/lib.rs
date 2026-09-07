@@ -89,13 +89,13 @@ fn runtime_is_owned(token_path: &Path) -> bool {
     response.starts_with("HTTP/1.1 200") && response.contains("\"status\"")
 }
 
-fn wait_for_runtime_ready(timeout: Duration) -> bool {
+fn wait_for_runtime_ready(timeout: Duration, token_path: &Path) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if runtime_is_listening() { return true; }
+        if runtime_is_owned(token_path) { return true; }
         thread::sleep(Duration::from_millis(100));
     }
-    runtime_is_listening()
+    runtime_is_owned(token_path)
 }
 
 #[tauri::command]
@@ -144,11 +144,11 @@ fn start_runtime(app: tauri::AppHandle, state: State<'_, RuntimeProcess>) -> Res
     }
     *state.resource_dir.lock().map_err(|_| "Runtime state lock is poisoned".to_string())? = Some(resource_dir);
 
-    if wait_for_runtime_ready(Duration::from_secs(5)) { Ok("started".into()) }
+    if wait_for_runtime_ready(Duration::from_secs(5), &token_path) { Ok("started".into()) }
     else {
         let mut guard = state.child.lock().map_err(|_| "Runtime process lock is poisoned".to_string())?;
         if let Some(mut child) = guard.take() { let _ = child.kill(); let _ = child.wait(); }
-        Err("Atrin runtime did not become ready on 127.0.0.1:8765".into())
+        Err("Atrin runtime did not become ready and authenticated on 127.0.0.1:8765".into())
     }
 }
 
