@@ -61,7 +61,15 @@ def install_workflow_hardening() -> None:
         workflow = connection.execute(
             "SELECT state FROM workflows WHERE workflow_id=?", (workflow_id,)
         ).fetchone()
-        if workflow is not None and workflow["state"] in {
+        state = workflow["state"] if workflow is not None else None
+        if state == WorkflowState.COMPLETED.value:
+            ledger = connection.execute(
+                "SELECT status FROM idempotency_ledger WHERE idempotency_key=? AND workflow_id=? AND step_id=? LIMIT 1",
+                (step["idempotency_key"], workflow_id, step["step_id"]),
+            ).fetchone()
+            if ledger is not None and ledger["status"] == ExecutionStatus.CONFIRMED.value:
+                return
+        if state in {
             WorkflowState.WAITING_FOR_AUTH.value,
             WorkflowState.WAITING_FOR_NETWORK.value,
             WorkflowState.WAITING_FOR_HUMAN_INTERACTION.value,
@@ -71,7 +79,7 @@ def install_workflow_hardening() -> None:
             WorkflowState.CANCELLED.value,
             WorkflowState.COMPLETED.value,
         }:
-            raise RuntimeError(f"Workflow is not executable from state: {workflow['state']}")
+            raise RuntimeError(f"Workflow is not executable from state: {state}")
         original_assert(self, connection, workflow_id, step)
 
     async def hardened_pause(self: Any, workflow_id: str, reason: str) -> None:
@@ -88,7 +96,20 @@ def install_workflow_hardening() -> None:
         skip_action: bool = False,
     ) -> Any:
         current = _state(self, workflow_id)
-        if current != WorkflowState.RECOVERING:
+        if skip_action:
+            if current in {
+                WorkflowState.COMPLETED,
+                WorkflowState.WAITING_FOR_AUTH,
+                WorkflowState.WAITING_FOR_NETWORK,
+                WorkflowState.WAITING_FOR_PROVIDER,
+                WorkflowState.WAITING_FOR_HUMAN_INTERACTION,
+                WorkflowState.WAITING_FOR_HUMAN_APPROVAL,
+                WorkflowState.FAILED,
+                WorkflowState.RECOVERING,
+                WorkflowState.IDLE,
+            }:
+                return await original_resume(self, workflow_id, checkpoint, skip_action)
+        elif current != WorkflowState.RECOVERING:
             assert_workflow_transition(current, WorkflowState.RECOVERING)
         return await original_resume(self, workflow_id, checkpoint, skip_action)
 
@@ -111,7 +132,6 @@ def install_workflow_hardening() -> None:
             WorkflowState.WAITING_FOR_PROVIDER,
             WorkflowState.CANCELLING,
             WorkflowState.CANCELLED,
-            WorkflowState.COMPLETED,
         }:
             raise RuntimeError(f"Workflow is not executable from state: {current.value}")
 
