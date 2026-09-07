@@ -16,8 +16,11 @@ class _DATA_BLOB(ctypes.Structure):
 class LocalSecurityManager:
     """Manage the local runtime token with platform-aware at-rest protection."""
 
-    def __init__(self, token_file_path: str = ".atrin_data/runtime_secret.token"):
-        self.token_file_path = token_file_path
+    def __init__(self, token_file_path: Optional[str] = None):
+        self.token_file_path = token_file_path or os.environ.get(
+            "ATRIN_RUNTIME_TOKEN_PATH",
+            str(Path(".atrin_data") / "runtime_secret.token"),
+        )
         self._token: Optional[str] = None
 
     @staticmethod
@@ -74,31 +77,31 @@ class LocalSecurityManager:
             os.chmod(temporary, 0o600)
         os.replace(temporary, token_path)
 
-    def _read_token(self, token_path: Path) -> str:
-        stored = token_path.read_bytes()
-
-        # Preferred format: base64-wrapped protected bytes.
+    def _try_read_protected(self, stored: bytes) -> Optional[str]:
         try:
             protected = base64.b64decode(stored, validate=True)
             raw = self._windows_unprotect(protected)
             token = raw.decode("utf-8").strip()
-            if self._is_valid_token(token):
-                return token
-        except Exception:
-            pass
+        except (ValueError, OSError, UnicodeDecodeError):
+            return None
+        return token if self._is_valid_token(token) else None
 
-        # Legacy format: plaintext token written by older Atrin versions.
+    def _read_legacy_token(self, stored: bytes) -> str:
         try:
             legacy = stored.decode("utf-8").strip()
         except UnicodeDecodeError as error:
             raise RuntimeError("Stored runtime token is corrupted") from error
         if not self._is_valid_token(legacy):
             raise RuntimeError("Stored runtime token is invalid or corrupted")
-
-        # Upgrade in place so an existing installation continues working while
-        # immediately moving to the new protected storage format.
         self._write_token(legacy)
         return legacy
+
+    def _read_token(self, token_path: Path) -> str:
+        stored = token_path.read_bytes()
+        protected_token = self._try_read_protected(stored)
+        if protected_token is not None:
+            return protected_token
+        return self._read_legacy_token(stored)
 
     def get_or_create_token(self) -> str:
         if self._token:
