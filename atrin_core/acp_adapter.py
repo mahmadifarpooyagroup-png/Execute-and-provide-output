@@ -44,7 +44,7 @@ class ACPAdapter(IProviderAdapter):
         if not self.session_id:
             await self.start_session()
         payload: Dict[str, Any] = {"session_id": self.session_id, "message": message}
-        metadata: Dict[str, str] = {}
+        metadata: dict[str, str] = {}
         if idempotency_key:
             metadata["atrin_idempotency_key"] = idempotency_key
         if operation_id:
@@ -64,29 +64,36 @@ class ACPAdapter(IProviderAdapter):
                       fencing_token: int | None = None) -> Dict[str, Any]:
         return await self.send_message(action, idempotency_key=idempotency_key, operation_id=operation_id)
 
+    async def resume_session(self, session_id: str) -> Dict[str, Any]:
+        self.session_id = session_id
+        self.config.session_id = session_id
+        response = await self._client.get(self._url(f"/session/{session_id}"))
+        response.raise_for_status()
+        self.protocol_state.state = "RESUMED"
+        self.protocol_state.health = "HEALTHY"
+        return response.json()
+
+    async def close_session(self) -> None:
+        if not self.session_id:
+            return
+        response = await self._client.delete(self._url(f"/session/{self.session_id}"))
+        response.raise_for_status()
+        self.protocol_state.state = "CLOSED"
+        self.protocol_state.health = "OFFLINE"
+        self.session_id = None
+        self.config.session_id = None
+
     async def verify_action(self, idempotency_key: str, *, operation_id: str | None = None) -> str:
-        if self._last_operation_key != idempotency_key or self._last_operation_id != operation_id:
+        if self._last_operation_key != idempotency_key or self._last_operation_id != operation_id or self._last_result is None:
             return "AMBIGUOUS"
-        return "CONFIRMED" if self._last_result is not None else "IN_PROGRESS"
+        return "CONFIRMED"
 
     async def cancel(self, idempotency_key: str, *, operation_id: str | None = None) -> bool:
+        # ACP cancellation semantics vary by implementation; a generic adapter
+        # must not invent a cancellation operation. Provider-specific subclasses
+        # can override this safely.
         return False
 
-    async def connect(self) -> None:
-        self.protocol_state.state = "CONNECTED"
-        self.protocol_state.health = "HEALTHY"
-
-    async def disconnect(self) -> None:
+    async def close(self) -> None:
         if self._owns_client:
             await self._client.aclose()
-        self.protocol_state.state = "DISCONNECTED"
-        self.protocol_state.health = "UNKNOWN"
-
-    async def detect_login_page(self) -> bool:
-        return False
-
-    async def detect_auth_challenge(self) -> bool:
-        return False
-
-    async def capture_evidence(self, *, screenshot: bool = False) -> dict[str, Any]:
-        return {"result": self._last_result, "screenshot": None if not screenshot else None}
