@@ -1,62 +1,26 @@
-# Atrin AI Control Plane — Project Status
+# Atrin AI Control Plane v2.3 — Project Status
 
-Date: 2026-09-07
+## Current state
 
-## Current status
+The repository is in a hardened RC state. Core persistence, workflow execution, recovery, provider registry, desktop/web adapters, Tauri packaging, frontend integration, and automated validation are implemented.
 
-`main` is the single active development line. The durable workflow core, SQLite persistence, session leasing/fencing, checkpoint recovery, authenticated local API, configuration-driven provider registry, frontend runtime integration, plugin persistence/isolation, Tauri packaging, and CI verification are implemented.
+## Automated validation
 
-## Verified in CI
+The GitHub Actions pipeline validates Python 3.10–3.14, compile/lint/type/security checks, the Python test suite, frontend lint/build, Playwright browser E2E, Tauri Linux checks, and Windows NSIS packaging.
 
-The release gate runs:
+## Hardened paths
 
-- Python 3.10, 3.11, 3.12, 3.13, and 3.14
-- Python compilation, Ruff, mypy, Bandit, and the full Python test suite
-- Frontend dependency installation, lint, and production build
-- Real Playwright browser E2E using a deterministic provider
-- Tauri Rust formatting and Linux compilation with `cargo check --locked`
-- Windows Tauri NSIS packaging and installer artifact upload
+- Workflow admission rejects terminal and waiting states from direct execution.
+- Workflow pause/resume/cancel calls are checked against the central state machine.
+- Expired execution claims are externally verified before reclaim, without holding a SQLite write transaction across network/provider I/O.
+- Side-effecting workflow actions default to protected mode in the desktop UI and are explicitly represented in the created step.
+- Web profile-aware adapters receive the durable provider-profile fencing token for protected execution.
+- Desktop CLI fallback delegates to a real backend operation rather than synthesizing a successful window.
+- Tauri startup authenticates an existing local runtime with the per-install runtime token instead of trusting port availability alone.
+- Frontend API calls have a bounded timeout and explicit abort handling.
 
-## Operational product path
+## Remaining environment validation
 
-The normal flow is:
+External provider credentials, real provider endpoints, per-account browser profiles, and clean-machine Windows installation still require deployment-specific acceptance testing. The repository does not invent credentials or claim those external environments are validated by deterministic CI.
 
-`Tauri/React UI -> authenticated local FastAPI -> ProviderAdapterRegistry -> WorkflowEngine -> adapter -> provider`
-
-Provider profiles and workflow steps are durable in SQLite. The UI now consumes the runtime API for provider catalog, provider profiles, workflow list/detail, workflow controls, recovery, and audit data rather than deterministic mock services.
-
-## Provider architecture
-
-Provider configuration is vendor-neutral. Built-in adapter IDs include:
-
-- `web` / `generic-web`
-- `api` / `chat-completions`
-- `mcp`
-- `a2a`
-- `acp`
-
-Credentials are referenced through environment variables and are not stored in provider configuration examples.
-
-## Security position
-
-- Runtime binds to loopback by default.
-- Protected API routes require the local runtime token.
-- SQLite enables foreign keys, WAL, and a busy timeout per connection.
-- Session lease ownership and fencing tokens are durable.
-- Ambiguous external side effects are not silently retried.
-- Plugins execute in dedicated worker processes and use persisted file hashes for restore validation.
-- Plugin worker isolation is not equivalent to a full OS/container sandbox; untrusted plugin uploads remain unsupported.
-- Browser profiles must be isolated per provider/account and treated as sensitive credential stores.
-
-## Remaining release validation
-
-These are environment-specific rather than known broken-code defects:
-
-1. Validate real provider adapters against each provider/account configuration with real credentials in a controlled environment.
-2. Validate the signed Windows installer and first launch on a clean target machine.
-3. Add an OS-native secure secret provider when higher-assurance credential storage is required outside the current runtime-token controls.
-4. Introduce stronger OS/container isolation before accepting untrusted third-party plugins.
-
-## Release position
-
-The repository is a **hardened RC baseline**. Core CI, frontend build, browser E2E, Tauri Linux checks, and Windows NSIS packaging must remain green. Production rollout requires provider-specific environment validation and trusted-plugin/credential policies; CI success is not a guarantee that every arbitrary external provider or deployment environment is compatible.
+Untrusted third-party plugin uploads remain unsupported because worker-process isolation is not equivalent to an OS/container sandbox.

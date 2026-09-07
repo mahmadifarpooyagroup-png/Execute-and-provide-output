@@ -79,6 +79,7 @@ WORKFLOW_TRANSITIONS: dict[str, set[str]] = {
         WorkflowState.PLAN_READY.value,
         WorkflowState.EXECUTING.value,
         WorkflowState.REJECTED.value,
+        WorkflowState.CANCELLING.value,
         WorkflowState.CANCELLED.value,
     },
     WorkflowState.WAITING_FOR_AUTH.value: {

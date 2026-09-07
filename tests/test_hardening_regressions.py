@@ -5,6 +5,8 @@ from atrin_core.desktop_adapter import GenericDesktopAdapter
 from atrin_core.desktop_models import WindowInfo
 from atrin_core.models import Provider
 from atrin_core.provider_registry import ProviderAdapterRegistry
+from atrin_core.state_machine import can_transition_workflow
+from atrin_core.models import WorkflowState
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -24,12 +26,7 @@ def test_generic_provider_alias_is_supported():
         "name": "Generic Provider",
         "adapter_id": "generic",
         "endpoint": "https://example.invalid",
-        "metadata": {
-            "api": {
-                "model": "test-model",
-                "api_key_env": "ATRIN_TEST_KEY",
-            }
-        },
+        "metadata": {"api": {"model": "test-model", "api_key_env": "ATRIN_TEST_KEY"}},
     })
     registry.register(provider)
     assert registry.get("generic-provider").adapter_id == "generic"
@@ -65,3 +62,13 @@ def test_profile_aware_registry_injects_fencing_callback():
     assert "_current_fencing_token" in source
     assert "current_fencing_token" in source
     assert 'profile_id != "default"' in source
+
+
+def test_state_machine_allows_cancellation_from_replanning():
+    assert can_transition_workflow(WorkflowState.REPLANNING, WorkflowState.CANCELLING)
+
+
+def test_workflow_hardening_installs_runtime_guards():
+    from atrin_core.workflow_engine import WorkflowEngine
+
+    assert getattr(WorkflowEngine, "_atrin_hardening_installed", False) is True
