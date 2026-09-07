@@ -68,7 +68,7 @@ Example API provider:
   {
     "id": "my-api",
     "name": "My API",
-    "adapter_id": "openai-compatible",
+    "adapter_id": "chat-completions",
     "connection_kind": "API",
     "endpoint": "https://example.invalid/v1",
     "metadata": {
@@ -82,7 +82,7 @@ Example API provider:
 ]
 ```
 
-The built-in adapter IDs are `web`, `generic-web`, `api`, `openai-compatible`, `mcp`, `a2a`, and `acp`. Web providers use selector configuration such as `start_url`, `composer_selector`, `send_selector`, `response_selector`, and optional `profile_path` under `metadata.web`.
+The built-in adapter IDs are `web`, `generic-web`, `api`, `chat-completions`, `mcp`, `a2a`, and `acp`. Web providers use selector configuration such as `start_url`, `composer_selector`, `send_selector`, `response_selector`, and optional `profile_path` under `metadata.web`.
 
 The desktop UI exposes the configured provider catalog through **Providers** and persists provider profiles in SQLite. Workflows can then be created and controlled from **Workflows**, including run-next, pause, resume, cancel, and live refresh of state.
 
