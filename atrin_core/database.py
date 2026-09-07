@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import uuid
 
 
 class AtrinDatabase:
     """SQLite persistence with per-connection safety pragmas and additive migrations."""
 
-    CURRENT_SCHEMA_VERSION = 4
+    CURRENT_SCHEMA_VERSION = 5
 
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -154,6 +155,38 @@ class AtrinDatabase:
             )
         """)
 
+    def _backfill_operation_ids(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            "SELECT step_id, task_id FROM steps WHERE operation_id IS NULL OR operation_id=''"
+        ).fetchall()
+        for row in rows:
+            operation_id = str(uuid.uuid4())
+            conn.execute("UPDATE steps SET operation_id=? WHERE step_id=?", (operation_id, row["step_id"]))
+        conn.execute("""
+            UPDATE idempotency_ledger
+            SET operation_id=(
+                SELECT s.operation_id FROM steps s
+                WHERE s.step_id=idempotency_ledger.step_id
+            )
+            WHERE operation_id IS NULL OR operation_id=''
+        """)
+
+    def _repair_duplicate_request_ids(self, conn: sqlite3.Connection) -> None:
+        duplicates = conn.execute("""
+            SELECT client_request_id FROM workflows
+            WHERE client_request_id IS NOT NULL AND client_request_id != ''
+            GROUP BY client_request_id HAVING COUNT(*) > 1
+        """).fetchall()
+        for duplicate in duplicates:
+            rows = conn.execute(
+                "SELECT workflow_id FROM workflows WHERE client_request_id=? ORDER BY created_at, workflow_id",
+                (duplicate["client_request_id"],),
+            ).fetchall()
+            # Preserve the oldest request identity and detach later legacy rows so
+            # the uniqueness guarantee can be added without destroying workflows.
+            for row in rows[1:]:
+                conn.execute("UPDATE workflows SET client_request_id=NULL WHERE workflow_id=?", (row["workflow_id"],))
+
     def _migrate(self, conn: sqlite3.Connection) -> None:
         self._add_column_if_missing(conn, "idempotency_ledger", "claim_owner", "TEXT")
         self._add_column_if_missing(conn, "idempotency_ledger", "attempt", "INTEGER NOT NULL DEFAULT 0")
@@ -165,17 +198,15 @@ class AtrinDatabase:
         self._add_column_if_missing(conn, "workflow_checkpoints", "revision", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing(conn, "workflows", "client_request_id", "TEXT")
 
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_workflows_client_request_id "
-                     "ON workflows(client_request_id) WHERE client_request_id IS NOT NULL")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_workflow_step "
-                     "ON idempotency_ledger(workflow_id, step_id, provider_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_expiry "
-                     "ON idempotency_ledger(status, expires_at)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_operation "
-                     "ON idempotency_ledger(operation_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_steps_workflow_order "
-                     "ON steps(task_id, order_index)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_steps_operation ON steps(operation_id)")
+        self._backfill_operation_ids(conn)
+        self._repair_duplicate_request_ids(conn)
+
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_workflows_client_request_id ON workflows(client_request_id) WHERE client_request_id IS NOT NULL")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_steps_operation_id ON steps(operation_id) WHERE operation_id IS NOT NULL")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_workflow_step ON idempotency_ledger(workflow_id, step_id, provider_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_expiry ON idempotency_ledger(status, expires_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_operation ON idempotency_ledger(operation_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_steps_workflow_order ON steps(task_id, order_index)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner_expiry ON sessions(lock_owner, lease_expiry)")
 
         conn.execute("""
