@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 from collections.abc import Mapping
@@ -10,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from .database import AtrinDatabase
-from .models import WorkflowState
+from .models import ExecutionStatus, StepStatus, TaskStatus, WorkflowState
 
 
 class CheckpointStore(Protocol):
@@ -73,8 +74,7 @@ class SQLiteCheckpointStore:
                 revision = 1
                 payload["revision"] = revision
                 connection.execute(
-                    "INSERT INTO workflow_checkpoints(workflow_id,checkpoint_version,revision,payload,updated_at) "
-                    "VALUES (?,?,?,?,?)",
+                    "INSERT INTO workflow_checkpoints(workflow_id,checkpoint_version,revision,payload,updated_at) VALUES (?,?,?,?,?)",
                     (workflow_id, version, revision, json.dumps(payload, separators=(",", ":"), sort_keys=True), now),
                 )
             else:
@@ -82,10 +82,8 @@ class SQLiteCheckpointStore:
                 revision = current + 1
                 payload["revision"] = revision
                 cursor = connection.execute(
-                    "UPDATE workflow_checkpoints SET checkpoint_version=?, revision=?, payload=?, updated_at=? "
-                    "WHERE workflow_id=? AND revision=?",
-                    (version, revision, json.dumps(payload, separators=(",", ":"), sort_keys=True),
-                     now, workflow_id, current),
+                    "UPDATE workflow_checkpoints SET checkpoint_version=?, revision=?, payload=?, updated_at=? WHERE workflow_id=? AND revision=?",
+                    (version, revision, json.dumps(payload, separators=(",", ":"), sort_keys=True), now, workflow_id, current),
                 )
                 if cursor.rowcount != 1:
                     raise RuntimeError("Checkpoint revision conflict")
@@ -135,10 +133,7 @@ def _supports_keyword(method: Any, name: str) -> bool:
         parameters = inspect.signature(method).parameters.values()
     except (TypeError, ValueError):
         return True
-    return any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == name
-        for parameter in parameters
-    )
+    return any(parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == name for parameter in parameters)
 
 
 class RecoveryEngine:
@@ -165,6 +160,103 @@ class RecoveryEngine:
         await _call(self.checkpoint_store.save, workflow_id, persisted)
         return persisted
 
+    def _finalize_verified_durable_operation(self, workflow_id: str, checkpoint: Mapping[str, Any]) -> None:
+        """Finalize a provider-confirmed operation without redispatching it."""
+        database = getattr(self.workflow_controller, "database", None)
+        if not isinstance(database, AtrinDatabase):
+            raise RuntimeError("Durable workflow controller is required to finalize a verified operation")
+
+        step_id = str(checkpoint.get("step_id") or "")
+        key = str(checkpoint.get("action_idempotency_key") or "")
+        if not step_id or not key:
+            raise RuntimeError("Verified recovery checkpoint is missing step identity")
+
+        connection = database.get_connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            workflow = connection.execute(
+                "SELECT state FROM workflows WHERE workflow_id=?", (workflow_id,)
+            ).fetchone()
+            if workflow is None:
+                raise LookupError(f"Workflow not found: {workflow_id}")
+            if workflow["state"] == WorkflowState.CANCELLED.value:
+                raise RuntimeError("Cancelled workflows are terminal and cannot be finalized")
+
+            step = connection.execute("""
+                SELECT s.*, t.workflow_id
+                FROM steps s JOIN tasks t ON t.task_id=s.task_id
+                WHERE s.step_id=? AND t.workflow_id=?
+            """, (step_id, workflow_id)).fetchone()
+            if step is None or step["idempotency_key"] != key:
+                raise RuntimeError("Recovery checkpoint does not match the durable step")
+
+            ledger = connection.execute(
+                "SELECT status, operation_id FROM idempotency_ledger WHERE idempotency_key=? AND workflow_id=? AND step_id=?",
+                (key, workflow_id, step_id),
+            ).fetchone()
+            if ledger is None:
+                raise RuntimeError("Cannot finalize a verified action without a durable execution record")
+            if ledger["operation_id"] not in (None, step["operation_id"]):
+                raise RuntimeError("Execution operation identity does not match the durable step")
+
+            connection.execute(
+                "UPDATE steps SET status=? WHERE step_id=?",
+                (StepStatus.CONFIRMED.value, step_id),
+            )
+            connection.execute(
+                "UPDATE idempotency_ledger SET status=?, confirmed_at=CURRENT_TIMESTAMP, expires_at=NULL, claim_owner=NULL, operation_id=? WHERE idempotency_key=? AND workflow_id=? AND step_id=?",
+                (ExecutionStatus.CONFIRMED.value, step["operation_id"], key, workflow_id, step_id),
+            )
+            connection.execute(
+                "UPDATE tasks SET status=? WHERE task_id=? AND NOT EXISTS (SELECT 1 FROM steps WHERE task_id=? AND status!=?)",
+                (TaskStatus.COMPLETED.value, step["task_id"], step["task_id"], StepStatus.CONFIRMED.value),
+            )
+            remaining = connection.execute(
+                "SELECT COUNT(*) AS n FROM tasks WHERE workflow_id=? AND status!=?",
+                (workflow_id, TaskStatus.COMPLETED.value),
+            ).fetchone()["n"]
+            final_state = WorkflowState.COMPLETED if remaining == 0 else WorkflowState.OBSERVING
+            connection.execute(
+                "UPDATE workflows SET state=?, updated_at=CURRENT_TIMESTAMP WHERE workflow_id=?",
+                (final_state.value, workflow_id),
+            )
+
+            row = connection.execute(
+                "SELECT revision, checkpoint_version FROM workflow_checkpoints WHERE workflow_id=?",
+                (workflow_id,),
+            ).fetchone()
+            revision = int(row["revision"]) + 1 if row else 1
+            payload = dict(checkpoint)
+            payload.update({"workflow_id": workflow_id, "state": final_state.value,
+                            "operation_id": step["operation_id"], "revision": revision})
+            version = int(payload.get("checkpoint_version", row["checkpoint_version"] if row else 1))
+            serialized = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+            if row:
+                updated = connection.execute(
+                    "UPDATE workflow_checkpoints SET checkpoint_version=?, revision=?, payload=?, updated_at=? WHERE workflow_id=? AND revision=?",
+                    (version, revision, serialized, datetime.now(timezone.utc).isoformat(), workflow_id, int(row["revision"])),
+                )
+                if updated.rowcount != 1:
+                    raise RuntimeError("Checkpoint revision conflict while finalizing recovery")
+            else:
+                connection.execute(
+                    "INSERT INTO workflow_checkpoints(workflow_id,checkpoint_version,revision,payload,updated_at) VALUES (?,?,?,?,?)",
+                    (workflow_id, version, revision, serialized, datetime.now(timezone.utc).isoformat()),
+                )
+
+            audit = getattr(self.workflow_controller, "_audit", None)
+            if callable(audit):
+                audit(connection, workflow_id, "ACTION_CONFIRMED_BY_VERIFIER", "recovery-engine",
+                      {"step_id": step_id, "operation_id": step["operation_id"], "status": "CONFIRMED"})
+                audit(connection, workflow_id, "RECOVERY_FINALIZED", "recovery-engine",
+                      {"step_id": step_id, "operation_id": step["operation_id"], "status": "CONFIRMED"})
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     async def resume_from_checkpoint(self, workflow_id: str) -> ResumeResult:
         checkpoint = await _call(self.checkpoint_store.load, workflow_id)
         if checkpoint is None:
@@ -182,7 +274,7 @@ class RecoveryEngine:
             status = str(await _call(verifier, action_key, **kwargs)).upper()
 
         if status == "CONFIRMED":
-            await _call(self.workflow_controller.resume_workflow, workflow_id, checkpoint, skip_action=True)
+            self._finalize_verified_durable_operation(workflow_id, checkpoint)
             return ResumeResult(workflow_id, status, resumed=True, skipped_action=True)
 
         if status in {"FAILED", "NOT_STARTED"}:
