@@ -6,12 +6,11 @@ import { useAppStore } from '../store/appStore'
 export function SettingsPage() {
   const { t } = useTranslation()
   const { settings, loadSettings } = useAppStore()
-  const [token, setToken] = useState('')
+  const [token, setToken] = useState(() => getRuntimeToken() ?? '')
   const [saved, setSaved] = useState(false)
 
   useEffect(() => {
     void loadSettings()
-    setToken(getRuntimeToken() ?? '')
   }, [loadSettings])
 
   const saveToken = () => {
