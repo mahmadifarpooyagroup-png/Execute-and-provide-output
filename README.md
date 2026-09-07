@@ -44,7 +44,7 @@ python -c "from atrin_core.database import AtrinDatabase; AtrinDatabase('.atrin_
 In one terminal, start the local runtime:
 
 ```bash
-uvicorn atrin_core.runtime:app --host 127.0.0.1 --port 8765
+uvicorn atrin_core.runtime:create_app --factory --host 127.0.0.1 --port 8765
 ```
 
 In a second terminal, start the frontend:
