@@ -142,6 +142,18 @@ jobs:
             git commit -m "chore(tauri): synchronize Cargo.lock [skip ci]"
             git push
           fi
+      - name: Format Rust sources
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          cargo fmt --all
+          if ! git diff --quiet -- frontend/src-tauri; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add frontend/src-tauri
+            git commit -m "style(tauri): apply rustfmt [skip ci]"
+            git push
+          fi
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
       - name: Check Tauri Rust project
