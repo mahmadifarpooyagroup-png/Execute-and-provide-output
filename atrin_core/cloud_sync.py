@@ -1,5 +1,7 @@
 """Encrypted, vendor-neutral checkpoint synchronization."""
 
+from __future__ import annotations
+
 import hashlib
 import inspect
 import json
@@ -27,49 +29,56 @@ class StorageProvider(Protocol):
 class HTTPStorageProvider:
     """Uses standard HTTP PUT/GET for S3-compatible and WebDAV endpoints."""
 
-    def __init__(self, base_url: str, headers: dict[str, str] | None = None):
+    def __init__(self, base_url: str, headers: dict[str, str] | None = None, timeout: float = 20.0):
         self.base_url = base_url.rstrip("/")
         self.headers = headers or {}
+        self.timeout = timeout
+        self._client = httpx.AsyncClient(timeout=timeout)
 
     def _url(self, remote_id: str) -> str:
         return f"{self.base_url}/{quote(remote_id, safe='/')}"
 
     async def upload(self, remote_id: str, payload: bytes) -> None:
-        async with httpx.AsyncClient() as client:
-            response = await client.put(self._url(remote_id), content=payload, headers=self.headers)
-            response.raise_for_status()
+        response = await self._client.put(self._url(remote_id), content=payload, headers=self.headers)
+        response.raise_for_status()
 
     async def download(self, remote_id: str) -> bytes:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(self._url(remote_id), headers=self.headers)
-            response.raise_for_status()
-            return response.content
+        response = await self._client.get(self._url(remote_id), headers=self.headers)
+        response.raise_for_status()
+        return response.content
+
+    async def close(self) -> None:
+        await self._client.aclose()
 
 
 class LocalNetworkStorageProvider:
     """Stores objects in a shared filesystem path, suitable for a mounted share."""
 
     def __init__(self, root_path: str):
-        self.root_path = Path(root_path)
+        self.root_path = Path(root_path).expanduser().resolve()
 
     def _path(self, remote_id: str) -> Path:
         candidate = (self.root_path / remote_id).resolve()
-        root = self.root_path.resolve()
-        if root != candidate and root not in candidate.parents:
+        if self.root_path != candidate and self.root_path not in candidate.parents:
             raise ValueError("Remote object ID escapes the configured storage path")
         return candidate
 
     async def upload(self, remote_id: str, payload: bytes) -> None:
         destination = self._path(remote_id)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(payload)
+        temporary = destination.with_suffix(destination.suffix + ".tmp")
+        temporary.write_bytes(payload)
+        temporary.replace(destination)
 
     async def download(self, remote_id: str) -> bytes:
         return self._path(remote_id).read_bytes()
 
+    async def close(self) -> None:
+        return None
+
 
 class CloudSyncManager:
-    """Synchronizes encrypted workflow checkpoints through a configured provider."""
+    """Synchronizes encrypted workflow checkpoints with revision-aware conflict detection."""
 
     _FORMAT_VERSION = 1
     _SALT_SIZE = 16
@@ -78,26 +87,28 @@ class CloudSyncManager:
     _ITERATIONS = 600_000
     _WORKFLOW_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
-    def __init__(
-        self,
-        recovery_engine: Any,
-        database: AtrinDatabase | None = None,
-        storage_provider: StorageProvider | None = None,
-    ):
+    def __init__(self, recovery_engine: Any, database: AtrinDatabase | None = None,
+                 storage_provider: StorageProvider | None = None):
         self.recovery_engine = recovery_engine
         self.database = database
         self.storage_provider = storage_provider
         self.sync_config: SyncConfig | None = None
         self._encryption_key: bytes | None = None
 
+    async def close(self) -> None:
+        close = getattr(self.storage_provider, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
     def configure_provider(self, provider_type: str, config: dict) -> SyncConfig:
         provider_type = provider_type.lower()
         if provider_type not in {"s3", "webdav", "local_network"}:
             raise ValueError("provider_type must be one of: s3, webdav, local_network")
-
         passphrase = config.get("encryption_key")
-        if not isinstance(passphrase, str) or not passphrase:
-            raise ValueError("config.encryption_key must be a non-empty user-derived secret")
+        if not isinstance(passphrase, str) or len(passphrase) < 12:
+            raise ValueError("config.encryption_key must contain at least 12 characters")
         endpoint = config.get("endpoint_url")
         bucket = config.get("bucket_name")
         path = config.get("path")
@@ -118,14 +129,12 @@ class CloudSyncManager:
             encryption_key_hash=hashlib.sha256(passphrase.encode()).hexdigest(),
         )
         if provider_type == "local_network":
-            root = path or self._file_url_path(endpoint)
-            self.storage_provider = LocalNetworkStorageProvider(root)
+            self.storage_provider = LocalNetworkStorageProvider(path or self._file_url_path(endpoint))
         else:
             base_url = endpoint.rstrip("/")
             if provider_type == "s3":
                 base_url = f"{base_url}/{quote(bucket, safe='')}"
-            headers = dict(config.get("headers", {}))
-            self.storage_provider = HTTPStorageProvider(base_url, headers)
+            self.storage_provider = HTTPStorageProvider(base_url, dict(config.get("headers", {})))
         return self.sync_config
 
     def encrypt_payload(self, data: dict) -> bytes:
@@ -153,32 +162,68 @@ class CloudSyncManager:
             raise ValueError("Encrypted payload must contain a JSON object")
         return value
 
+    @staticmethod
+    def _canonical_checkpoint(checkpoint: dict) -> str:
+        return json.dumps(checkpoint, separators=(",", ":"), sort_keys=True)
+
+    @classmethod
+    def _content_hash(cls, checkpoint: dict) -> str:
+        return hashlib.sha256(cls._canonical_checkpoint(checkpoint).encode()).hexdigest()
+
     async def push_checkpoint(self, workflow_id: str) -> SyncStatus:
         self._require_provider()
         checkpoint = await self._call(self.recovery_engine.checkpoint_store.load, workflow_id)
         if checkpoint is None:
             raise LookupError(f"No checkpoint found for workflow {workflow_id}")
-        timestamp = self._timestamp(checkpoint.get("updated_at"))
-        envelope = {"checkpoint": checkpoint, "synced_at": timestamp, "version": self._version(checkpoint)}
+        revision = int(checkpoint.get("revision", 0))
+        content_hash = self._content_hash(checkpoint)
+        synced_at = self._timestamp(checkpoint.get("updated_at"))
+        envelope = {
+            "checkpoint": checkpoint,
+            "synced_at": synced_at,
+            "revision": revision,
+            "content_hash": content_hash,
+            "format_version": self._FORMAT_VERSION,
+        }
         remote_id = self._remote_id(workflow_id)
         await self._call(self.storage_provider.upload, remote_id, self.encrypt_payload(envelope))
-        self._write_metadata(workflow_id, remote_id, timestamp, SyncDirection.PUSH, False)
-        return SyncStatus(last_synced_at=datetime.fromisoformat(timestamp), sync_direction=SyncDirection.PUSH,
-                          remote_version=envelope["version"], local_version=envelope["version"])
+        self._write_metadata(workflow_id, remote_id, synced_at, SyncDirection.PUSH, False)
+        return SyncStatus(last_synced_at=datetime.fromisoformat(synced_at), sync_direction=SyncDirection.PUSH,
+                          remote_version=str(revision), local_version=str(revision))
 
     async def pull_checkpoint(self, workflow_id: str) -> dict:
         self._require_provider()
         remote_id = self._remote_id(workflow_id)
         remote = self.decrypt_payload(await self._call(self.storage_provider.download, remote_id))
         checkpoint = remote.get("checkpoint", remote)
+        if not isinstance(checkpoint, dict):
+            raise ValueError("Remote checkpoint payload is invalid")
+        remote_revision = int(remote.get("revision", checkpoint.get("revision", 0)))
+        remote_hash = str(remote.get("content_hash") or self._content_hash(checkpoint))
         local = await self._call(self.recovery_engine.checkpoint_store.load, workflow_id)
+        local_revision = int(local.get("revision", 0)) if local else None
+        local_hash = self._content_hash(local) if local else None
         remote_timestamp = self._timestamp(remote.get("synced_at") or checkpoint.get("updated_at"))
-        local_timestamp = self._timestamp(local.get("updated_at")) if local else None
-        conflict = bool(local and local_timestamp and remote_timestamp > local_timestamp)
-        self._write_metadata(workflow_id, remote_id, remote_timestamp, SyncDirection.CONFLICT if conflict else SyncDirection.PULL, conflict)
+
+        if local is None:
+            conflict = False
+        else:
+            conflict = (remote_revision != int(local_revision)) or (remote_hash != local_hash)
+
+        self._write_metadata(
+            workflow_id, remote_id, remote_timestamp,
+            SyncDirection.CONFLICT if conflict else SyncDirection.PULL, conflict,
+        )
         if conflict:
-            return {"checkpoint": checkpoint, "conflict": True, "local_timestamp": local_timestamp,
-                    "remote_timestamp": remote_timestamp, "warning": "Remote checkpoint is newer; review before applying."}
+            return {
+                "checkpoint": checkpoint,
+                "conflict": True,
+                "local_revision": local_revision,
+                "remote_revision": remote_revision,
+                "local_hash": local_hash,
+                "remote_hash": remote_hash,
+                "warning": "Local and remote checkpoints diverged; review before applying.",
+            }
         return checkpoint
 
     def _require_key(self) -> bytes:
@@ -200,7 +245,7 @@ class CloudSyncManager:
     @staticmethod
     def _derive_key(passphrase: str, salt: bytes) -> bytes:
         return PBKDF2HMAC(algorithm=SHA256(), length=CloudSyncManager._KEY_SIZE, salt=salt,
-                         iterations=CloudSyncManager._ITERATIONS).derive(passphrase.encode())
+                          iterations=CloudSyncManager._ITERATIONS).derive(passphrase.encode())
 
     @classmethod
     def _derive_key_from_key(cls, key: bytes, salt: bytes) -> bytes:
@@ -218,10 +263,6 @@ class CloudSyncManager:
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc).isoformat()
-
-    @staticmethod
-    def _version(checkpoint: dict) -> str:
-        return str(checkpoint.get("checkpoint_version", checkpoint.get("updated_at", "1")))
 
     @staticmethod
     def _file_url_path(value: str | None) -> str:
