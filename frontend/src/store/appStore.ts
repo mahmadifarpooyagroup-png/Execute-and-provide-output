@@ -9,7 +9,7 @@ import {
 } from '../services/api'
 
 export type ProviderStatus = 'healthy' | 'warning' | 'offline'
-export type WorkflowStatus = 'running' | 'paused' | 'retrying' | 'completed'
+export type WorkflowStatus = 'running' | 'paused' | 'cancelling' | 'cancelled' | 'retrying' | 'completed'
 export type RecoveryPriority = 'high' | 'medium' | 'low'
 
 export interface ProviderItem {
@@ -65,13 +65,33 @@ interface AppState {
   loadWorkflows: () => Promise<void>
   loadRecoveryQueue: () => Promise<void>
   loadSettings: () => Promise<void>
+  saveSettings: (settings: AppSettings) => void
 }
 
+const SETTINGS_KEY = 'atrin.app.settings'
 const defaultSettings: AppSettings = {
   theme: 'dark',
   autoRecover: true,
   retentionDays: 30,
   notifications: true,
+}
+
+function readSettings(): AppSettings {
+  try {
+    const raw = window.localStorage.getItem(SETTINGS_KEY)
+    if (!raw) return defaultSettings
+    const parsed = JSON.parse(raw) as Partial<AppSettings>
+    return {
+      theme: parsed.theme === 'light' ? 'light' : 'dark',
+      autoRecover: parsed.autoRecover !== false,
+      retentionDays: Number.isFinite(parsed.retentionDays) && Number(parsed.retentionDays) >= 1
+        ? Math.min(3650, Number(parsed.retentionDays))
+        : defaultSettings.retentionDays,
+      notifications: parsed.notifications !== false,
+    }
+  } catch {
+    return defaultSettings
+  }
 }
 
 function providerStatus(provider: RuntimeProvider): ProviderStatus {
@@ -101,6 +121,10 @@ function workflowStatus(state: string): WorkflowStatus {
   switch (state) {
     case 'COMPLETED':
       return 'completed'
+    case 'CANCELLED':
+      return 'cancelled'
+    case 'CANCELLING':
+      return 'cancelling'
     case 'WAITING_FOR_AUTH':
     case 'WAITING_FOR_NETWORK':
     case 'WAITING_FOR_PROVIDER':
@@ -159,7 +183,7 @@ export const useAppStore = create<AppState>((set) => ({
     const dashboard: DashboardOverview = {
       totalProviders: providers.length,
       healthyProviders: mappedProviders.filter((provider) => provider.status === 'healthy').length,
-      activeWorkflows: mappedWorkflows.filter((workflow) => workflow.status !== 'completed').length,
+      activeWorkflows: mappedWorkflows.filter((workflow) => !['completed', 'cancelled'].includes(workflow.status)).length,
       alerts: recoveryQueue.length,
       uptime: '—',
     }
@@ -182,6 +206,17 @@ export const useAppStore = create<AppState>((set) => ({
   },
 
   loadSettings: async () => {
-    set({ settings: defaultSettings })
+    set({ settings: readSettings() })
+  },
+
+  saveSettings: (settings: AppSettings) => {
+    const normalized: AppSettings = {
+      theme: settings.theme === 'light' ? 'light' : 'dark',
+      autoRecover: Boolean(settings.autoRecover),
+      retentionDays: Math.min(3650, Math.max(1, Math.trunc(Number(settings.retentionDays) || defaultSettings.retentionDays)),
+      notifications: Boolean(settings.notifications),
+    }
+    window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(normalized))
+    set({ settings: normalized })
   },
 }))
