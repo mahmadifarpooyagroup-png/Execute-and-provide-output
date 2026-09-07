@@ -28,6 +28,12 @@ jobs:
         run: python -m playwright install --with-deps chromium
       - name: Compile Python sources
         run: python -m compileall -q atrin_core
+      - name: Ruff lint
+        run: ruff check atrin_core tests
+      - name: Mypy type check
+        run: mypy atrin_core
+      - name: Bandit security scan
+        run: bandit -q -r atrin_core
       - name: Run tests
         env:
           PYTHONPATH: .
