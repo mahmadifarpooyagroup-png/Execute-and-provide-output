@@ -1,4 +1,5 @@
-import { FormEvent, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
+import type { FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { createProviderProfile, getProviderCatalog, type RuntimeProviderCatalogItem } from '../services/api'
 import { useAppStore } from '../store/appStore'
