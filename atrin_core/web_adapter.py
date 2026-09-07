@@ -5,9 +5,10 @@ import base64
 import json
 import re
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
-from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
+if TYPE_CHECKING:
+    from playwright.async_api import Browser, BrowserContext, Page, Playwright
 
 from .interfaces import IProviderAdapter
 from .profile_paths import get_browser_profile_path
@@ -69,6 +70,12 @@ class GenericWebAdapter(IProviderAdapter):
     async def launch(self, url: Optional[str] = None) -> Page:
         if self.page and not self.page.is_closed():
             return self.page
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError as error:
+            raise RuntimeError(
+                "Web execution requires the optional 'web' dependency: pip install 'atrin-core[web]'"
+            ) from error
         self.playwright = await async_playwright().start()
         if self.mode == BrowserMode.CDP_ATTACH:
             self._validate_cdp_permission()
