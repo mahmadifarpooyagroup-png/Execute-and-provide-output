@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use tauri::{Manager, State};
 
@@ -12,19 +13,35 @@ struct RuntimeProcess {
 
 impl RuntimeProcess {
     fn new() -> Self {
-        Self { child: Mutex::new(None), resource_dir: Mutex::new(None) }
+        Self {
+            child: Mutex::new(None),
+            resource_dir: Mutex::new(None),
+        }
+    }
+}
+
+impl Drop for RuntimeProcess {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.child.lock() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
     }
 }
 
 fn find_on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|dir| dir.join(name)).find(|candidate| candidate.is_file())
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
 }
 
 fn find_python(resource_dir: &Path) -> Option<PathBuf> {
     if let Ok(value) = std::env::var("ATRIN_PYTHON") {
         let candidate = PathBuf::from(value);
-        if candidate.exists() {
+        if candidate.is_file() {
             return Some(candidate);
         }
     }
@@ -34,20 +51,16 @@ fn find_python(resource_dir: &Path) -> Option<PathBuf> {
     } else {
         resource_dir.join("runtime").join("bin").join("python3")
     };
-    if bundled.exists() {
+    if bundled.is_file() {
         return Some(bundled);
     }
 
-    for candidate in if cfg!(target_os = "windows") {
+    let candidates = if cfg!(target_os = "windows") {
         vec!["python.exe", "python", "py.exe", "py"]
     } else {
         vec!["python3", "python"]
-    } {
-        if let Some(path) = find_on_path(candidate) {
-            return Some(path);
-        }
-    }
-    None
+    };
+    candidates.into_iter().find_map(find_on_path)
 }
 
 fn runtime_is_listening() -> bool {
@@ -58,19 +71,52 @@ fn runtime_is_listening() -> bool {
     .is_ok()
 }
 
+fn wait_for_runtime_ready(timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if runtime_is_listening() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    runtime_is_listening()
+}
+
 #[tauri::command]
 fn start_runtime(app: tauri::AppHandle, state: State<'_, RuntimeProcess>) -> Result<String, String> {
     if runtime_is_listening() {
         return Ok("already-running".into());
     }
 
-    let resource_dir = app.path().resource_dir().map_err(|error| error.to_string())?;
+    {
+        let mut guard = state
+            .child
+            .lock()
+            .map_err(|_| "Runtime process lock is poisoned".to_string())?;
+        if let Some(child) = guard.as_mut() {
+            match child.try_wait() {
+                Ok(None) => return Ok("starting".into()),
+                Ok(Some(_)) => *guard = None,
+                Err(error) => return Err(format!("Failed to inspect runtime process: {error}")),
+            }
+        }
+    }
+
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|error| error.to_string())?;
     let python = find_python(&resource_dir).ok_or_else(|| {
-        "Python runtime was not found. Install Python 3.12+ or provide ATRIN_PYTHON to the application.".to_string()
+        "Python runtime was not found. Install Python 3.12+ or provide ATRIN_PYTHON to the application."
+            .to_string()
     })?;
 
-    let data_dir = app.path().app_local_data_dir().map_err(|error| error.to_string())?;
-    std::fs::create_dir_all(&data_dir).map_err(|error| format!("Cannot create Atrin data directory: {error}"))?;
+    let data_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|error| format!("Cannot create Atrin data directory: {error}"))?;
     let db_path = data_dir.join("atrin.db");
     let token_path = data_dir.join("runtime_secret.token");
 
@@ -87,9 +133,31 @@ fn start_runtime(app: tauri::AppHandle, state: State<'_, RuntimeProcess>) -> Res
         .spawn()
         .map_err(|error| format!("Failed to start Atrin runtime: {error}"))?;
 
-    *state.child.lock().map_err(|_| "Runtime process lock is poisoned".to_string())? = Some(child);
-    *state.resource_dir.lock().map_err(|_| "Runtime state lock is poisoned".to_string())? = Some(resource_dir);
-    Ok("started".into())
+    {
+        let mut guard = state
+            .child
+            .lock()
+            .map_err(|_| "Runtime process lock is poisoned".to_string())?;
+        *guard = Some(child);
+    }
+    *state
+        .resource_dir
+        .lock()
+        .map_err(|_| "Runtime state lock is poisoned".to_string())? = Some(resource_dir);
+
+    if wait_for_runtime_ready(Duration::from_secs(5)) {
+        Ok("started".into())
+    } else {
+        let mut guard = state
+            .child
+            .lock()
+            .map_err(|_| "Runtime process lock is poisoned".to_string())?;
+        if let Some(mut child) = guard.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        Err("Atrin runtime did not become ready on 127.0.0.1:8765".into())
+    }
 }
 
 #[tauri::command]
@@ -97,7 +165,10 @@ fn runtime_status(state: State<'_, RuntimeProcess>) -> Result<String, String> {
     if runtime_is_listening() {
         return Ok("running".into());
     }
-    let mut guard = state.child.lock().map_err(|_| "Runtime process lock is poisoned".to_string())?;
+    let mut guard = state
+        .child
+        .lock()
+        .map_err(|_| "Runtime process lock is poisoned".to_string())?;
     if let Some(child) = guard.as_mut() {
         match child.try_wait() {
             Ok(Some(_)) => {
@@ -114,9 +185,14 @@ fn runtime_status(state: State<'_, RuntimeProcess>) -> Result<String, String> {
 
 #[tauri::command]
 fn stop_runtime(state: State<'_, RuntimeProcess>) -> Result<String, String> {
-    let mut guard = state.child.lock().map_err(|_| "Runtime process lock is poisoned".to_string())?;
+    let mut guard = state
+        .child
+        .lock()
+        .map_err(|_| "Runtime process lock is poisoned".to_string())?;
     if let Some(mut child) = guard.take() {
-        child.kill().map_err(|error| format!("Failed to stop Atrin runtime: {error}"))?;
+        child
+            .kill()
+            .map_err(|error| format!("Failed to stop Atrin runtime: {error}"))?;
         let _ = child.wait();
         return Ok("stopped".into());
     }
