@@ -17,14 +17,11 @@ export function WorkflowsPage() {
     () => providers.find((provider) => provider.id === providerId) ?? providers[0],
     [providers, providerId],
   )
+  const selectedProviderId = providerId || selectedProvider?.id || ''
 
   useEffect(() => {
     void loadWorkflows().catch(() => undefined)
   }, [loadWorkflows])
-
-  useEffect(() => {
-    if (!providerId && providers.length > 0) setProviderId(providers[0].id)
-  }, [providerId, providers])
 
   useEffect(() => {
     const hasActive = workflows.some((workflow) => !['completed', 'cancelled'].includes(workflow.status))
@@ -54,8 +51,8 @@ export function WorkflowsPage() {
 
   const createNewWorkflow = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!selectedProvider) {
-      setError(t('no_provider_adapters'))
+    if (!selectedProvider || !selectedProviderId) {
+      setError(t('no_provider_profiles'))
       return
     }
     setCreating(true)
@@ -108,7 +105,7 @@ export function WorkflowsPage() {
           <form className="form-grid" onSubmit={createNewWorkflow}>
             <label>
               <span>{t('provider')}</span>
-              <select className="setting-input" value={providerId} onChange={(event) => setProviderId(event.target.value)} required>
+              <select className="setting-input" value={selectedProviderId} onChange={(event) => setProviderId(event.target.value)} required>
                 {providers.map((provider) => (
                   <option key={provider.id} value={provider.id}>{provider.name} · {provider.type}</option>
                 ))}
