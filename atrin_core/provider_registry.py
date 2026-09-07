@@ -60,14 +60,8 @@ class CompatibleChatAdapter(IProviderAdapter):
             headers[self.idempotency_header] = idempotency_key
         return headers
 
-    async def execute(
-        self,
-        action: str,
-        idempotency_key: str,
-        *,
-        operation_id: str | None = None,
-        fencing_token: int | None = None,
-    ) -> dict[str, Any]:
+    async def execute(self, action: str, idempotency_key: str, *, operation_id: str | None = None,
+                      fencing_token: int | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": "user", "content": action}],
@@ -166,7 +160,7 @@ class _ProfileAwareAdapter(IProviderAdapter):
         if profile_id not in self._adapters:
             adapter = self.factory(self.provider, profile_id)
             if profile_id != "default" and hasattr(adapter, "current_fencing_token"):
-                setattr(adapter, "current_fencing_token", lambda: self._current_fencing_token(profile_id))
+                adapter.current_fencing_token = lambda: self._current_fencing_token(profile_id)  # type: ignore[attr-defined]
             self._adapters[profile_id] = adapter
         return self._adapters[profile_id]
 
