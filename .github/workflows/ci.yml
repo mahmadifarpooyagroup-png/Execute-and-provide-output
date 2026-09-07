@@ -7,8 +7,8 @@ on:
     branches: [main]
 
 concurrency:
-  group: atrin-ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: atrin-ci-${{ github.workflow }}-${{ github.sha }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -17,6 +17,7 @@ jobs:
   python:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -51,6 +52,7 @@ jobs:
 
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: frontend
@@ -71,6 +73,7 @@ jobs:
   ui-e2e:
     name: Browser E2E
     runs-on: ubuntu-latest
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -101,6 +104,7 @@ jobs:
 
   tauri:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
     defaults:
@@ -145,6 +149,7 @@ jobs:
 
   tauri-windows:
     runs-on: windows-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: frontend
