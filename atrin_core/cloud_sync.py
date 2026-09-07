@@ -136,10 +136,12 @@ class CloudSyncManager:
             local_path = path if isinstance(path, str) else self._file_url_path(endpoint if isinstance(endpoint, str) else None)
             self.storage_provider = LocalNetworkStorageProvider(local_path)
         else:
-            assert isinstance(endpoint, str)
+            if not isinstance(endpoint, str):
+                raise ValueError("endpoint_url is required for HTTP storage providers")
             base_url = endpoint.rstrip("/")
             if provider_type == "s3":
-                assert isinstance(bucket, str)
+                if not isinstance(bucket, str):
+                    raise ValueError("bucket_name is required for s3 storage")
                 base_url = f"{base_url}/{quote(bucket, safe='')}"
             self.storage_provider = HTTPStorageProvider(base_url, dict(config.get("headers", {})))
         return self.sync_config
@@ -223,8 +225,8 @@ class CloudSyncManager:
         if local is None:
             conflict = False
         else:
-            assert local_revision is not None
-            assert local_hash is not None
+            if local_revision is None or local_hash is None:
+                raise ValueError("Local checkpoint metadata is incomplete")
             conflict = remote_revision != local_revision or remote_hash != local_hash
 
         self._write_metadata(
