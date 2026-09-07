@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
@@ -11,7 +11,7 @@ from .database import AtrinDatabase
 from .models import Step, Task, WorkflowState
 from .security import LocalSecurityManager
 from .session_manager import SessionManager
-from .workflow_engine import WorkflowEngine
+from .workflow_engine import ActionAdapter, WorkflowEngine
 
 
 DB_PATH = os.getenv("ATRIN_DB_PATH", ".atrin_data/atrin.db")
@@ -52,10 +52,18 @@ class SessionReleaseRequest(BaseModel):
     fencing_token: int = Field(ge=0)
 
 
-def create_app(db_path: str = DB_PATH, token_path: str = TOKEN_PATH) -> FastAPI:
+def create_app(
+    db_path: str = DB_PATH,
+    token_path: str = TOKEN_PATH,
+    adapters: Mapping[str, ActionAdapter] | None = None,
+) -> FastAPI:
     database = AtrinDatabase(db_path)
     session_manager = SessionManager(database)
-    workflow_engine = WorkflowEngine(database, session_manager=session_manager)
+    workflow_engine = WorkflowEngine(
+        database,
+        adapters=adapters,
+        session_manager=session_manager,
+    )
     app = FastAPI(title="Atrin Local Control Plane", version="0.2.0")
 
     def get_security_manager() -> LocalSecurityManager:
