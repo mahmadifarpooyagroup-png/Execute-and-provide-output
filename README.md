@@ -10,6 +10,7 @@ Atrin is a local-first, vendor-neutral AI control plane for configuring provider
 
 - [Documentation](#documentation)
 - [Quick Start](#quick-start)
+- [Provider Configuration](#provider-configuration)
 - [Architecture](#architecture)
 - [Development](#development)
 - [Contributing](#contributing)
@@ -24,6 +25,7 @@ Atrin is a local-first, vendor-neutral AI control plane for configuring provider
 - [FAQ](docs/FAQ.md): user, developer, security, and privacy questions.
 - [Changelog](docs/CHANGELOG.md): v2.3 features, phases, breaking changes, and known issues.
 - [Build Instructions](BUILD_INSTRUCTIONS.md): Windows Tauri packaging.
+- [Project Status](docs/PROJECT_STATUS.md): current implementation and release position.
 
 ## Quick Start
 
@@ -53,9 +55,36 @@ npm install
 npm run dev
 ```
 
-Open the Vite URL printed in the terminal, normally `http://localhost:5173`. Check the runtime with `curl http://127.0.0.1:8765/health`.
+Open the Vite URL printed in the terminal, normally `http://localhost:5173`. The runtime health endpoint is public; control-plane API endpoints require the local runtime token stored by the backend.
 
-> **Current scope:** The v2.3 React screens are a desktop UI foundation backed by deterministic mock data. The Python core, SQLite persistence, workflow engine, recovery engine, adapters, and automated tests are implemented. The HTTP API currently exposes health and authenticated runtime status only.
+## Provider Configuration
+
+The provider registry is configuration-driven and remains vendor-neutral. Set `ATRIN_PROVIDERS_JSON` to a JSON array or point `ATRIN_PROVIDERS_FILE` at a JSON file. Credentials belong in environment variables, never in source control.
+
+Example API provider:
+
+```json
+[
+  {
+    "id": "my-api",
+    "name": "My API",
+    "adapter_id": "openai-compatible",
+    "connection_kind": "API",
+    "endpoint": "https://example.invalid/v1",
+    "metadata": {
+      "api": {
+        "model": "my-model",
+        "api_key_env": "MY_API_KEY"
+      },
+      "capabilities": ["chat"]
+    }
+  }
+]
+```
+
+The built-in adapter IDs are `web`, `generic-web`, `api`, `openai-compatible`, `mcp`, `a2a`, and `acp`. Web providers use selector configuration such as `start_url`, `composer_selector`, `send_selector`, `response_selector`, and optional `profile_path` under `metadata.web`.
+
+The desktop UI exposes the configured provider catalog through **Providers** and persists provider profiles in SQLite. Workflows can then be created and controlled from **Workflows**, including run-next, pause, resume, cancel, and live refresh of state.
 
 ## Architecture
 
@@ -64,16 +93,18 @@ User
 	|
 Tauri 2 desktop shell / React + TypeScript UI
 	|
-Local FastAPI runtime (127.0.0.1:8765)
+Authenticated Local FastAPI runtime (127.0.0.1:8765)
 	|
-Vendor-neutral workflow engine -- execution bus -- permission checks
-	|                         |
-SQLite + checkpoints       Provider adapters
-	|                         |
-Audit + idempotency         Web | Desktop | API | MCP | A2A | ACP
+Provider Registry -- Workflow Engine -- Execution Bus
+	|                    |                |
+Provider Profiles      SQLite          Permission / timeout controls
+	|                    |
+Adapters               Checkpoints / idempotency / audit
+	|
+Web | Desktop | API | MCP | A2A | ACP
 ```
 
-Workflows remain authoritative inside Atrin even when an external provider session pauses, expires, or reconnects. SQLite uses WAL mode and stores provider profiles, sessions, workflows, tasks, steps, checkpoints, idempotency records, and audit events.
+Workflows remain authoritative inside Atrin even when an external provider session pauses, expires, or reconnects. SQLite uses WAL mode and stores provider profiles, sessions, workflows, tasks, steps, checkpoints, idempotency records, plugin registry metadata, and audit events.
 
 ## Development
 
@@ -82,11 +113,13 @@ pytest
 cd frontend && npm run lint && npm run build
 ```
 
-Run the acceptance and UI smoke checks with:
+Run deterministic acceptance checks with:
 
 ```bash
 pytest tests/test_e2e_acceptance.py tests/test_e2e_ui_smoke.py -v
 ```
+
+The CI pipeline also runs a real Playwright browser journey against a deterministic test provider, covering provider profile creation, workflow creation, execution, completion, and dashboard refresh.
 
 For a Windows installer, install Rust stable, WebView2, and the native build tools, then run `npm run tauri build` from `frontend` on Windows.
 
