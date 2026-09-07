@@ -18,9 +18,10 @@ _SAFE_ENV_KEYS = {"PATH", "TEMP", "TMP", "USERPROFILE", "SYSTEMROOT", "COMSPEC",
 def _plugin_worker(plugin_path: str, connection: Any) -> None:
     """Load and execute one plugin in a separate spawned process."""
     try:
+        inherited_env = dict(os.environ)
         os.environ.clear()
         for key in _SAFE_ENV_KEYS:
-            value = os.environ.get(key)
+            value = inherited_env.get(key)
             if value is not None:
                 os.environ[key] = value
         path = Path(plugin_path).resolve()
@@ -80,9 +81,9 @@ def _plugin_worker(plugin_path: str, connection: Any) -> None:
 class _PluginProxy(IPlugin):
     """Synchronous IPC proxy for a plugin worker."""
 
-    def __init__(self, plugin_path: Path, metadata: dict[str, str], timeout: float = 30.0):
+    def __init__(self, plugin_path: Path, timeout: float = 30.0):
         self.plugin_path = plugin_path
-        self.metadata = metadata
+        self.metadata: dict[str, str] = {}
         self.timeout = timeout
         context = mp.get_context("spawn")
         self._parent, child = context.Pipe()
@@ -98,6 +99,11 @@ class _PluginProxy(IPlugin):
             self._process.terminate()
             self._process.join(3)
             raise RuntimeError(response.get("error", "Plugin worker failed to initialize"))
+        metadata = response.get("metadata")
+        if not isinstance(metadata, dict):
+            self.cleanup()
+            raise RuntimeError("Plugin worker returned invalid metadata")
+        self.metadata = {str(key): str(value) for key, value in metadata.items()}
 
     def get_metadata(self) -> dict:
         return dict(self.metadata)
@@ -120,7 +126,10 @@ class _PluginProxy(IPlugin):
 
     def cleanup(self) -> None:
         if not self._process.is_alive():
-            self._parent.close()
+            try:
+                self._parent.close()
+            except Exception:
+                pass
             return
         try:
             self._parent.send({"command": "cleanup"})
@@ -153,15 +162,12 @@ class PluginManager:
         source = path.read_text(encoding="utf-8")
         self._validate_imports(source, path)
 
-        # A temporary worker performs the import/initialization so untrusted
-        # plugin code never executes in the control-plane process.
-        proxy = _PluginProxy(path, {}, self.worker_timeout)
+        proxy = _PluginProxy(path, self.worker_timeout)
         metadata = proxy.get_metadata()
         plugin_id = metadata["plugin_id"]
         if plugin_id in self._plugins:
             proxy.cleanup()
             raise ValueError(f"Plugin is already registered: {plugin_id}")
-        proxy.metadata = metadata
         self._plugins[plugin_id] = proxy
         self._metadata[plugin_id] = dict(metadata)
         return plugin_id
@@ -182,7 +188,6 @@ class PluginManager:
         except SyntaxError as error:
             raise ValueError(f"Plugin contains invalid Python: {error}") from error
         for node in ast.walk(tree):
-            imported_name = None
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     imported_name = alias.name
