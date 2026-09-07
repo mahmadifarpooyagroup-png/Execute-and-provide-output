@@ -1,53 +1,62 @@
 # Atrin AI Control Plane — Project Status
 
+Date: 2026-09-07
+
 ## Current status
 
-The `main` branch is the single active development line. Core durability, session leasing, fencing, recovery, authenticated local API, provider adapters, plugin persistence/isolation, frontend runtime integration, and CI hardening are implemented and continuously checked.
+`main` is the single active development line. The durable workflow core, SQLite persistence, session leasing/fencing, checkpoint recovery, authenticated local API, configuration-driven provider registry, frontend runtime integration, plugin persistence/isolation, Tauri packaging, and CI verification are implemented.
 
 ## Verified in CI
 
-The latest successful CI run on the previous `main` head verified:
+The release gate runs:
 
-- Python 3.10, 3.11, 3.12, 3.13, and 3.14 installation and test execution
-- Playwright Chromium installation
-- Python syntax compilation
-- Ruff lint, mypy type checking, and Bandit security scanning
-- Python test suite (69 tests in the Python 3.13 job)
+- Python 3.10, 3.11, 3.12, 3.13, and 3.14
+- Python compilation, Ruff, mypy, Bandit, and the full Python test suite
 - Frontend dependency installation, lint, and production build
-- Tauri Rust formatting and Linux compilation checks
-- Windows Tauri NSIS packaging
+- Real Playwright browser E2E using a deterministic provider
+- Tauri Rust formatting and Linux compilation with `cargo check --locked`
+- Windows Tauri NSIS packaging and installer artifact upload
 
-## Operational APIs
+## Operational product path
 
-The local FastAPI runtime provides authenticated endpoints for workflow creation/list/detail, step execution, pause/resume/cancel, provider profiles, session acquire/renew/release, recovery listing, and audit listing.
+The normal flow is:
 
-The runtime remains intentionally local-only by default. Persisting a provider profile does not automatically load executable provider code; a provider adapter must be registered in the `WorkflowEngine` runtime.
+`Tauri/React UI -> authenticated local FastAPI -> ProviderAdapterRegistry -> WorkflowEngine -> adapter -> provider`
 
-## Frontend status
+Provider profiles and workflow steps are durable in SQLite. The UI now consumes the runtime API for provider catalog, provider profiles, workflow list/detail, workflow controls, recovery, and audit data rather than deterministic mock services.
 
-The active React application uses `frontend/src/services/api.ts` and the authenticated runtime API. Runtime/provider/workflow/recovery/audit reads and workflow control actions are routed through the local API rather than the removed deterministic mock service. The Settings screen provides a local runtime-token entry point using session-scoped browser storage.
+## Provider architecture
 
-The UI is an operational foundation, but advanced workflow authoring, live step progress, richer provider configuration, and full recovery UX still require additional product-level integration work.
+Provider configuration is vendor-neutral. Built-in adapter IDs include:
 
-## Important security boundaries
+- `web` / `generic-web`
+- `api` / `chat-completions`
+- `mcp`
+- `a2a`
+- `acp`
 
-- The runtime is local-only by default.
-- Provider/session execution can require an exact fencing token and active lease.
+Credentials are referenced through environment variables and are not stored in provider configuration examples.
+
+## Security position
+
+- Runtime binds to loopback by default.
+- Protected API routes require the local runtime token.
+- SQLite enables foreign keys, WAL, and a busy timeout per connection.
+- Session lease ownership and fencing tokens are durable.
 - Ambiguous external side effects are not silently retried.
-- Web evidence is redacted/bounded before persistence where adapter-level evidence capture supports it.
-- Plugins execute in dedicated spawned worker processes, have persistent registry metadata with file-hash verification, and are not equivalent to a full OS/container sandbox. Only administrator-controlled plugins should be treated as trusted until stronger OS-level isolation is introduced.
-- The local runtime token is generated and protected by the backend runtime; the frontend keeps the token only for the current browser/Tauri session and does not persist it in localStorage.
-- Windows packaging must be validated on the Windows CI runner and on the target deployment environment before release.
+- Plugins execute in dedicated worker processes and use persisted file hashes for restore validation.
+- Plugin worker isolation is not equivalent to a full OS/container sandbox; untrusted plugin uploads remain unsupported.
+- Browser profiles must be isolated per provider/account and treated as sensitive credential stores.
 
-## Known remaining work
+## Remaining release validation
 
-- Complete the provider adapter registry and runtime wiring for real external providers.
-- Finish workflow controls and live state/action feedback in the React UI.
-- Add a platform secure-secret integration where higher-assurance desktop credential handling is required.
-- Add true browser-driven UI E2E coverage for critical user journeys; current UI smoke coverage remains source-level/deterministic.
-- Add environment-specific tests using real provider credentials and authenticated sessions.
-- Validate the final Windows installer on a clean Windows machine.
+These are environment-specific rather than known broken-code defects:
+
+1. Validate real provider adapters against each provider/account configuration with real credentials in a controlled environment.
+2. Validate the signed Windows installer and first launch on a clean target machine.
+3. Add an OS-native secure secret provider when higher-assurance credential storage is required outside the current runtime-token controls.
+4. Introduce stronger OS/container isolation before accepting untrusted third-party plugins.
 
 ## Release position
 
-The core test suite, frontend build, Tauri checks, and Windows packaging gate are passing in CI on the current development line. This repository should be treated as a hardened development/RC baseline, not as a blanket claim of production readiness for arbitrary external providers, untrusted plugins, or every Windows deployment environment.
+The repository is a **hardened RC baseline**. Core CI, frontend build, browser E2E, Tauri Linux checks, and Windows NSIS packaging must remain green. Production rollout requires provider-specific environment validation and trusted-plugin/credential policies; CI success is not a guarantee that every arbitrary external provider or deployment environment is compatible.
