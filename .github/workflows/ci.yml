@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   python:
@@ -93,6 +93,18 @@ jobs:
           toolchain: stable
           components: rustfmt
           cache: false
+      - name: Synchronize Cargo.lock
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          cargo generate-lockfile
+          if ! git diff --quiet -- frontend/src-tauri/Cargo.lock; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add frontend/src-tauri/Cargo.lock
+            git commit -m "chore(tauri): synchronize Cargo.lock [skip ci]"
+            git push
+          fi
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
       - name: Check Tauri Rust project
