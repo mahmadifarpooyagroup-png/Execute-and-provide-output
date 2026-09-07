@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import re
@@ -61,6 +63,7 @@ class GenericWebAdapter(IProviderAdapter):
         self.strategy: Optional[ProviderInteractionStrategy] = None
         self._owns_browser = False
         self._last_action_key: Optional[str] = None
+        self._last_operation_id: Optional[str] = None
 
     async def launch(self, url: Optional[str] = None) -> Page:
         if self.page and not self.page.is_closed():
@@ -104,7 +107,7 @@ class GenericWebAdapter(IProviderAdapter):
                     """
                 )
             else:
-                await self.page.goto(target_url)
+                await self.page.goto(target_url, wait_until="domcontentloaded")
         return self.page
 
     async def attach(self, cdp_endpoint: str, *, target_url: Optional[str] = None) -> Page:
@@ -137,9 +140,12 @@ class GenericWebAdapter(IProviderAdapter):
             """
             () => {
                 const clone = document.body.cloneNode(true);
-                clone.querySelectorAll('input,textarea').forEach(el => el.removeAttribute('value'));
-                clone.querySelectorAll('[type="password"],[name*="token" i],[name*="secret" i],[name*="authorization" i]')
-                    .forEach(el => el.replaceChildren());
+                clone.querySelectorAll('input,textarea').forEach(el => {
+                    el.removeAttribute('value');
+                    el.textContent = '';
+                });
+                clone.querySelectorAll('[type="password"],[name*="token" i],[name*="secret" i],[name*="authorization" i],[data-token]')
+                    .forEach(el => el.replaceChildren(document.createTextNode('[REDACTED]')));
                 clone.querySelectorAll('[value]').forEach(el => el.removeAttribute('value'));
                 return clone.innerHTML;
             }
@@ -149,23 +155,39 @@ class GenericWebAdapter(IProviderAdapter):
             "response_text": await self.strategy.extract_response(),  # type: ignore[union-attr]
             "page_state": {"url": self.page.url, "title": await self.page.title()},
             "dom": self._redact_text(str(dom)),
+            "operation_id": self._last_operation_id,
         }
         if screenshot:
-            evidence["screenshot"] = await self.page.screenshot(encoding="base64")
+            style_id = "atrin-evidence-redaction"
+            await self.page.add_style_tag(content=(
+                f"#{style_id}{{}} "
+                "input[type='password'], input[name*='token' i], input[name*='secret' i], "
+                "input[name*='authorization' i], [data-token], [data-secret] {"
+                "filter: blur(16px) !important; color: transparent !important; text-shadow: none !important; }"
+            ), id=style_id)
+            try:
+                evidence["screenshot"] = await self.page.screenshot(encoding="base64")
+            finally:
+                await self.page.evaluate("(id) => document.getElementById(id)?.remove()", style_id)
         return evidence
 
     @staticmethod
     def _redact_text(value: str) -> str:
-        return re.sub(
-            r"(?i)(authorization|bearer|token|secret|password)=([^&\s<]+)",
-            r"\1=[REDACTED]",
-            value,
-        )[:200_000]
+        value = re.sub(r"(?i)(authorization|bearer|token|secret|password)=([^&\s<]+)", r"\1=[REDACTED]", value)
+        return re.sub(r"(?i)((?:authorization|token|secret|password)\s*[:=]\s*)[^\s,;<]+", r"\1[REDACTED]", value)[:200_000]
 
-    async def execute(self, action: str, idempotency_key: str, *, fencing_token: Optional[int] = None) -> dict[str, Any]:
+    async def execute(
+        self,
+        action: str,
+        idempotency_key: str,
+        *,
+        operation_id: str | None = None,
+        fencing_token: Optional[int] = None,
+    ) -> dict[str, Any]:
         self._check_fencing_token(fencing_token)
         strategy = await self._ready()
         self._last_action_key = idempotency_key
+        self._last_operation_id = operation_id
         await strategy.send_message(action)
         deadline = asyncio.get_running_loop().time() + self.completion_timeout
         while not await strategy.detect_completion():
@@ -175,17 +197,30 @@ class GenericWebAdapter(IProviderAdapter):
                 raise TimeoutError("provider response did not complete")
             await asyncio.sleep(0.1)
         evidence = await self.capture_evidence()
-        return {"result": evidence["response_text"], "evidence": json.dumps(evidence)}
+        return {
+            "result": evidence["response_text"],
+            "evidence": json.dumps(evidence),
+            "operation_id": operation_id,
+            "verified": False,
+        }
 
-    async def verify_action(self, idempotency_key: str) -> str:
+    async def verify_action(self, idempotency_key: str, *, operation_id: str | None = None) -> str:
         strategy = await self._ready()
-        if self._last_action_key != idempotency_key:
+        if self._last_action_key != idempotency_key or self._last_operation_id != operation_id:
             return "AMBIGUOUS"
         if await strategy.detect_auth_challenge():
             return "AUTH_REQUIRED"
         if await strategy.verify_action(idempotency_key):
             return "CONFIRMED"
         return "AMBIGUOUS"
+
+    async def cancel(self, idempotency_key: str, *, operation_id: str | None = None) -> bool:
+        # Generic web transport cannot safely infer how a provider cancels a
+        # submitted action. Provider-specific strategies should implement a real
+        # cancellation endpoint/UI when supported.
+        if self._last_action_key != idempotency_key or self._last_operation_id != operation_id:
+            return False
+        return False
 
     async def _ready(self) -> ProviderInteractionStrategy:
         if not self.strategy or not self.page or self.page.is_closed():
@@ -200,9 +235,7 @@ class GenericWebAdapter(IProviderAdapter):
             raise StaleFencingTokenError("fencing token is required for protected web execution")
         current = int(self.current_fencing_token())
         if int(supplied) != current:
-            raise StaleFencingTokenError(
-                f"invalid fencing token {supplied}; current token is {current}"
-            )
+            raise StaleFencingTokenError(f"invalid fencing token {supplied}; current token is {current}")
 
     def _validate_cdp_permission(self) -> None:
         if not self.allow_cdp_attach:
