@@ -1,14 +1,11 @@
 [package]
-name = "app"
-version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
-license = ""
-repository = ""
+name = "atrin-control-plane"
+version = "0.3.0"
+description = "Atrin AI Control Plane desktop application"
+authors = ["Atrin AI Control Plane"]
+repository = "https://github.com/mahmadifarpooyagroup-png/Execute-and-provide-output"
 edition = "2021"
 rust-version = "1.77.2"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
 name = "app_lib"
