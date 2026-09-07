@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from enum import Enum
 from typing import Any, Callable, Optional
 
@@ -21,10 +22,7 @@ class StaleFencingTokenError(RuntimeError):
 
 
 class GenericWebAdapter(IProviderAdapter):
-    """Playwright transport shared by web providers.
-
-    Provider selectors and response semantics remain in ``strategy``.
-    """
+    """Playwright transport shared by web providers."""
 
     def __init__(
         self,
@@ -62,6 +60,7 @@ class GenericWebAdapter(IProviderAdapter):
         self.page: Optional[Page] = None
         self.strategy: Optional[ProviderInteractionStrategy] = None
         self._owns_browser = False
+        self._last_action_key: Optional[str] = None
 
     async def launch(self, url: Optional[str] = None) -> Page:
         if self.page and not self.page.is_closed():
@@ -76,9 +75,7 @@ class GenericWebAdapter(IProviderAdapter):
             self.context, self.page = self._select_attached_page(url or self.start_url)
         elif self.mode == BrowserMode.PERSISTENT_BROWSER:
             browser_type = getattr(self.playwright, self.browser_name)
-            self.context = await browser_type.launch_persistent_context(
-                self.profile_path, headless=self.headless
-            )
+            self.context = await browser_type.launch_persistent_context(self.profile_path, headless=self.headless)
             self._owns_browser = True
             self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
         else:
@@ -136,18 +133,39 @@ class GenericWebAdapter(IProviderAdapter):
     async def capture_evidence(self, *, screenshot: bool = False) -> dict[str, Any]:
         await self._ready()
         assert self.page is not None
+        dom = await self.page.evaluate(
+            """
+            () => {
+                const clone = document.body.cloneNode(true);
+                clone.querySelectorAll('input,textarea').forEach(el => el.removeAttribute('value'));
+                clone.querySelectorAll('[type="password"],[name*="token" i],[name*="secret" i],[name*="authorization" i]')
+                    .forEach(el => el.replaceChildren());
+                clone.querySelectorAll('[value]').forEach(el => el.removeAttribute('value'));
+                return clone.innerHTML;
+            }
+            """
+        )
         evidence: dict[str, Any] = {
             "response_text": await self.strategy.extract_response(),  # type: ignore[union-attr]
             "page_state": {"url": self.page.url, "title": await self.page.title()},
-            "dom": await self.page.evaluate("() => document.body.innerHTML"),
+            "dom": self._redact_text(str(dom)),
         }
         if screenshot:
             evidence["screenshot"] = await self.page.screenshot(encoding="base64")
         return evidence
 
+    @staticmethod
+    def _redact_text(value: str) -> str:
+        return re.sub(
+            r"(?i)(authorization|bearer|token|secret|password)=([^&\s<]+)",
+            r"\1=[REDACTED]",
+            value,
+        )[:200_000]
+
     async def execute(self, action: str, idempotency_key: str, *, fencing_token: Optional[int] = None) -> dict[str, Any]:
         self._check_fencing_token(fencing_token)
         strategy = await self._ready()
+        self._last_action_key = idempotency_key
         await strategy.send_message(action)
         deadline = asyncio.get_running_loop().time() + self.completion_timeout
         while not await strategy.detect_completion():
@@ -160,10 +178,14 @@ class GenericWebAdapter(IProviderAdapter):
         return {"result": evidence["response_text"], "evidence": json.dumps(evidence)}
 
     async def verify_action(self, idempotency_key: str) -> str:
-        await self._ready()
-        if await self.strategy.detect_auth_challenge():  # type: ignore[union-attr]
+        strategy = await self._ready()
+        if self._last_action_key != idempotency_key:
+            return "AMBIGUOUS"
+        if await strategy.detect_auth_challenge():
             return "AUTH_REQUIRED"
-        return "CONFIRMED" if await self.strategy.detect_completion() else "NOT_STARTED"  # type: ignore[union-attr]
+        if await strategy.verify_action(idempotency_key):
+            return "CONFIRMED"
+        return "AMBIGUOUS"
 
     async def _ready(self) -> ProviderInteractionStrategy:
         if not self.strategy or not self.page or self.page.is_closed():
@@ -172,12 +194,14 @@ class GenericWebAdapter(IProviderAdapter):
         return self.strategy
 
     def _check_fencing_token(self, supplied: Optional[int]) -> None:
-        if supplied is None or self.current_fencing_token is None:
+        if self.current_fencing_token is None:
             return
-        current = self.current_fencing_token()
-        if supplied < current:
+        if supplied is None:
+            raise StaleFencingTokenError("fencing token is required for protected web execution")
+        current = int(self.current_fencing_token())
+        if int(supplied) != current:
             raise StaleFencingTokenError(
-                f"stale fencing token {supplied}; current token is {current}"
+                f"invalid fencing token {supplied}; current token is {current}"
             )
 
     def _validate_cdp_permission(self) -> None:
