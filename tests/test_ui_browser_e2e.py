@@ -89,17 +89,16 @@ def browser_servers(tmp_path_factory):
         stop_process(runtime)
 
 
-def seed_session(page: Page, *, wizard_complete: bool = True) -> None:
-    wizard_script = (
-        "window.localStorage.setItem('atrin.wizard.complete', 'true');"
-        if wizard_complete
-        else "window.localStorage.removeItem('atrin.wizard.complete');"
-    )
-    page.add_init_script(
+def seed_session(page: Page, *, wizard_complete: bool | None = True) -> None:
+    script = (
         "window.sessionStorage.setItem('atrin.runtime.token', %r);"
-        "window.localStorage.setItem('i18nextLng', 'en');"
-        "%s" % (E2E_TOKEN, wizard_script)
+        "window.localStorage.setItem('i18nextLng', 'en');" % E2E_TOKEN
     )
+    if wizard_complete is True:
+        script += "window.localStorage.setItem('atrin.wizard.complete', 'true');"
+    elif wizard_complete is False:
+        script += "window.localStorage.removeItem('atrin.wizard.complete');"
+    page.add_init_script(script)
 
 
 def test_first_run_wizard_progress_and_persistence(browser_servers):
@@ -121,11 +120,23 @@ def test_first_run_wizard_progress_and_persistence(browser_servers):
             assert steps.nth(expected_active).get_attribute("class") == "wizard-step active"
 
         page.get_by_test_id("wizard-continue").click()
-        page.wait_for_url(f"{FRONTEND_URL}/dashboard")
+        page.wait_for_function("location.pathname === '/dashboard'")
         assert page.evaluate("window.localStorage.getItem('atrin.wizard.complete')") == "true"
 
-        page.goto(FRONTEND_URL, wait_until="domcontentloaded")
-        page.wait_for_url(f"{FRONTEND_URL}/dashboard")
+        # Validate persistence across a fresh browser context without the
+        # initial-page seed script that intentionally clears wizard state.
+        storage_state = page.context.storage_state()
+        returning_context = browser.new_context(storage_state=storage_state)
+        returning_page = returning_context.new_page()
+        returning_page.set_default_timeout(10000)
+        returning_page.add_init_script(
+            "window.sessionStorage.setItem('atrin.runtime.token', %r);"
+            "window.localStorage.setItem('i18nextLng', 'en');" % E2E_TOKEN
+        )
+        returning_page.goto(FRONTEND_URL, wait_until="domcontentloaded")
+        returning_page.wait_for_function("location.pathname === '/dashboard'")
+        assert returning_page.url == f"{FRONTEND_URL}/dashboard"
+        returning_context.close()
         browser.close()
 
 
