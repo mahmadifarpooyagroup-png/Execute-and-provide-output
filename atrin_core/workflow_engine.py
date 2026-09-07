@@ -256,6 +256,41 @@ class WorkflowEngine:
         finally:
             connection.close()
 
+    def _mark_ambiguous(self, workflow_id: str, step_id: str, key: str, reason: str) -> None:
+        connection = self.database.get_connection()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "UPDATE steps SET status='FAILED', result=?, evidence=NULL "
+                "WHERE step_id=? AND status IN ('EXECUTING','FAILED')",
+                (reason, step_id),
+            )
+            connection.execute(
+                "UPDATE idempotency_ledger SET status='AMBIGUOUS', expires_at=NULL, claim_owner=NULL "
+                "WHERE idempotency_key=? AND workflow_id=? AND step_id=?",
+                (key, workflow_id, step_id),
+            )
+            connection.execute(
+                "UPDATE workflows SET state=?, updated_at=CURRENT_TIMESTAMP WHERE workflow_id=?",
+                (WorkflowState.WAITING_FOR_PROVIDER.value, workflow_id),
+            )
+            checkpoint = self._load_in_connection(connection, workflow_id) or {"workflow_id": workflow_id}
+            checkpoint.update({
+                "state": WorkflowState.WAITING_FOR_PROVIDER.value,
+                "waiting_reason": reason,
+                "step_id": step_id,
+                "action_idempotency_key": key,
+            })
+            self._checkpoint(connection, workflow_id, checkpoint)
+            self._audit(connection, workflow_id, "ACTION_AMBIGUOUS", "workflow-engine",
+                        {"step_id": step_id, "idempotency_key": key, "reason": reason})
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     async def execute_step(self, workflow_id: str, step_id: str) -> Any:
         # Read and handle confirmed idempotency before checking terminal workflow
         # state: replaying a confirmed step must remain a safe read operation.
@@ -578,6 +613,8 @@ class WorkflowEngine:
                                    (final_state.value, workflow_id))
                 checkpoint["state"] = final_state.value
                 self._checkpoint(connection, workflow_id, checkpoint)
+                self._audit(connection, workflow_id, "ACTION_CONFIRMED_BY_VERIFIER", "recovery-engine",
+                            {"step_id": step["step_id"], "status": "CONFIRMED"})
                 self._audit(connection, workflow_id, "RECOVERY_FINALIZED", "recovery-engine",
                             {"step_id": step["step_id"], "status": "CONFIRMED"})
                 connection.commit()
