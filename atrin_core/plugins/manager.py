@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from ..database import AtrinDatabase
 from .base import IPlugin
 
 
@@ -144,7 +145,7 @@ class PluginManager:
     }
     _BLOCKED_CALLS = {"__import__", "compile", "eval", "exec", "input", "open"}
 
-    def __init__(self, worker_timeout: float = 30.0, database: Any | None = None):
+    def __init__(self, worker_timeout: float = 30.0, database: AtrinDatabase | None = None):
         self._plugins: dict[str, _PluginProxy] = {}
         self._metadata: dict[str, dict] = {}
         self.worker_timeout = worker_timeout
@@ -231,6 +232,8 @@ class PluginManager:
             connection.close()
 
     def _persist_plugin(self, plugin_id: str, path: Path, metadata: dict[str, str]) -> None:
+        if self.database is None:
+            raise RuntimeError("Plugin persistence requires a database")
         connection = self.database.get_connection()
         try:
             connection.execute(
