@@ -6,7 +6,7 @@ import ctypes.wintypes
 import os
 import secrets
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, cast
 
 
 class _DATA_BLOB(ctypes.Structure):
@@ -24,13 +24,14 @@ class LocalSecurityManager:
     def _windows_protect(value: bytes) -> bytes:
         if os.name != "nt":
             return value
-        crypt32 = ctypes.windll.crypt32
-        kernel32 = ctypes.windll.kernel32
+        windows_ctypes = cast(Any, ctypes)
+        crypt32 = windows_ctypes.windll.crypt32
+        kernel32 = windows_ctypes.windll.kernel32
         source = ctypes.create_string_buffer(value)
         in_blob = _DATA_BLOB(len(value), ctypes.cast(source, ctypes.POINTER(ctypes.c_char)))
         out_blob = _DATA_BLOB()
         if not crypt32.CryptProtectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
-            raise OSError(ctypes.get_last_error(), "CryptProtectData failed")
+            raise OSError(windows_ctypes.get_last_error(), "CryptProtectData failed")
         try:
             return ctypes.string_at(out_blob.pbData, out_blob.cbData)
         finally:
@@ -40,13 +41,14 @@ class LocalSecurityManager:
     def _windows_unprotect(value: bytes) -> bytes:
         if os.name != "nt":
             return value
-        crypt32 = ctypes.windll.crypt32
-        kernel32 = ctypes.windll.kernel32
+        windows_ctypes = cast(Any, ctypes)
+        crypt32 = windows_ctypes.windll.crypt32
+        kernel32 = windows_ctypes.windll.kernel32
         source = ctypes.create_string_buffer(value)
         in_blob = _DATA_BLOB(len(value), ctypes.cast(source, ctypes.POINTER(ctypes.c_char)))
         out_blob = _DATA_BLOB()
         if not crypt32.CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
-            raise OSError(ctypes.get_last_error(), "CryptUnprotectData failed")
+            raise OSError(windows_ctypes.get_last_error(), "CryptUnprotectData failed")
         try:
             return ctypes.string_at(out_blob.pbData, out_blob.cbData)
         finally:
