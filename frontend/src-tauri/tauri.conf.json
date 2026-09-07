@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Atrin AI Control Plane",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "identifier": "com.atrin.controlplane",
   "build": {
     "frontendDist": "../dist",
@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-eval' http://localhost:5173; connect-src 'self' http://127.0.0.1:8765 http://localhost:5173 ws://localhost:5173; img-src 'self' asset: https://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {
@@ -32,7 +32,7 @@
       "nsis"
     ],
     "publisher": "Atrin",
-    "copyright": "Copyright \u00c2\u00a9 Atrin",
+    "copyright": "Copyright (C) Atrin",
     "category": "Utility",
     "shortDescription": "Atrin AI Control Plane",
     "longDescription": "Atrin AI Control Plane provides durable workflow orchestration, provider adapters, and recovery management for end-to-end automation.",
