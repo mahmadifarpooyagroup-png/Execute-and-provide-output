@@ -1,4 +1,3 @@
-import ast
 from pathlib import Path
 
 
@@ -16,15 +15,15 @@ def test_major_ui_routes_and_wizard_are_declared():
     assert "continue_setup" in wizard_source
 
 
-def test_provider_and_workflow_pages_render_mock_data():
+def test_provider_and_workflow_pages_use_runtime_store():
     providers_source = _read_file("frontend/src/pages/Providers.tsx")
     workflows_source = _read_file("frontend/src/pages/Workflows.tsx")
-    mock_api_source = _read_file("frontend/src/services/mockApi.ts")
+    store_source = _read_file("frontend/src/store/appStore.ts")
 
     assert "providers.map" in providers_source
     assert "workflows.map" in workflows_source
-    assert "getProviders" in mock_api_source
-    assert "getWorkflows" in mock_api_source
+    assert "from '../services/api'" in store_source
+    assert "mockApi" not in store_source
     assert "connected_providers" in providers_source
     assert "workflow_engine" in workflows_source
 
