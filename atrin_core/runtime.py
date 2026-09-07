@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Mapping, Optional
+from typing import Mapping, Optional
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .database import AtrinDatabase
-from .models import Step, Task, WorkflowState
+from .models import Task, WorkflowState
 from .security import LocalSecurityManager
 from .session_manager import SessionManager
 from .workflow_engine import ActionAdapter, WorkflowEngine
-
 
 DB_PATH = os.getenv("ATRIN_DB_PATH", ".atrin_data/atrin.db")
 TOKEN_PATH = os.getenv("ATRIN_RUNTIME_TOKEN_PATH", ".atrin_data/runtime_secret.token")
@@ -97,17 +96,29 @@ def create_app(
     async def list_workflows(state: Optional[str] = Query(None), authenticated: bool = Depends(require_auth)):
         connection = database.get_connection()
         try:
+            base_sql = """
+                SELECT w.workflow_id, w.goal, w.state, w.plan_version, w.created_at, w.updated_at,
+                       COUNT(t.task_id) AS task_count,
+                       COALESCE(SUM(CASE WHEN t.status='COMPLETED' THEN 1 ELSE 0 END), 0) AS completed_task_count
+                FROM workflows w
+                LEFT JOIN tasks t ON t.workflow_id=w.workflow_id
+            """
             if state:
-                rows = connection.execute(
-                    "SELECT workflow_id, goal, state, plan_version, created_at, updated_at FROM workflows "
-                    "WHERE state=? ORDER BY updated_at DESC", (state,)
-                ).fetchall()
+                query = base_sql + " WHERE w.state=? GROUP BY w.workflow_id ORDER BY w.updated_at DESC"
+                rows = connection.execute(query, (state,)).fetchall()
             else:
-                rows = connection.execute(
-                    "SELECT workflow_id, goal, state, plan_version, created_at, updated_at FROM workflows "
-                    "ORDER BY updated_at DESC"
-                ).fetchall()
-            return {"items": [dict(row) for row in rows]}
+                query = base_sql + " GROUP BY w.workflow_id ORDER BY w.updated_at DESC"
+                rows = connection.execute(query).fetchall()
+            items = []
+            for row in rows:
+                item = dict(row)
+                total = int(item.pop("task_count") or 0)
+                completed = int(item.pop("completed_task_count") or 0)
+                item["progress"] = 100 if item["state"] == WorkflowState.COMPLETED.value else (
+                    round(completed * 100 / total) if total else 0
+                )
+                items.append(item)
+            return {"items": items}
         finally:
             connection.close()
 
@@ -131,8 +142,12 @@ def create_app(
                 "WHERE t.workflow_id=? ORDER BY t.order_index,s.order_index", (workflow_id,)
             ).fetchall()
             checkpoint = await workflow_engine.load(workflow_id)
-            return {"workflow": dict(workflow), "tasks": [dict(row) for row in tasks],
-                    "steps": [dict(row) for row in steps], "checkpoint": checkpoint}
+            return {
+                "workflow": dict(workflow),
+                "tasks": [dict(row) for row in tasks],
+                "steps": [dict(row) for row in steps],
+                "checkpoint": checkpoint,
+            }
         finally:
             connection.close()
 
