@@ -60,6 +60,7 @@ interface AppState {
   recoveryQueue: RecoveryItem[]
   settings: AppSettings
   isLoading: boolean
+  error: string | null
   loadDashboard: () => Promise<void>
   loadProviders: () => Promise<void>
   loadWorkflows: () => Promise<void>
@@ -165,6 +166,22 @@ function mapRecoveryItem(item: RuntimeRecoveryItem): RecoveryItem {
   }
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'Runtime is unavailable. Check that the Atrin runtime is running.'
+}
+
+async function withLoading(set: (state: Partial<AppState>) => void, action: () => Promise<void>): Promise<void> {
+  set({ isLoading: true, error: null })
+  try {
+    await action()
+  } catch (error) {
+    set({ error: errorMessage(error) })
+    throw error
+  } finally {
+    set({ isLoading: false })
+  }
+}
+
 export const useAppStore = create<AppState>((set) => ({
   dashboard: null,
   providers: [],
@@ -172,8 +189,9 @@ export const useAppStore = create<AppState>((set) => ({
   recoveryQueue: [],
   settings: defaultSettings,
   isLoading: false,
+  error: null,
 
-  loadDashboard: async () => {
+  loadDashboard: async () => withLoading(set, async () => {
     const [providers, workflows, recoveryQueue] = await Promise.all([
       getRuntimeProviders(),
       getRuntimeWorkflows(),
@@ -188,23 +206,23 @@ export const useAppStore = create<AppState>((set) => ({
       alerts: recoveryQueue.length,
       uptime: '—',
     }
-    set({ dashboard })
-  },
+    set({ dashboard, providers: mappedProviders, workflows: mappedWorkflows, recoveryQueue: recoveryQueue.map(mapRecoveryItem) })
+  }),
 
-  loadProviders: async () => {
+  loadProviders: async () => withLoading(set, async () => {
     const providers = await getRuntimeProviders()
     set({ providers: providers.map(mapProvider) })
-  },
+  }),
 
-  loadWorkflows: async () => {
+  loadWorkflows: async () => withLoading(set, async () => {
     const workflows = await getRuntimeWorkflows()
     set({ workflows: workflows.map(mapWorkflow) })
-  },
+  }),
 
-  loadRecoveryQueue: async () => {
+  loadRecoveryQueue: async () => withLoading(set, async () => {
     const recoveryQueue = await getRuntimeRecoveryQueue()
     set({ recoveryQueue: recoveryQueue.map(mapRecoveryItem) })
-  },
+  }),
 
   loadSettings: async () => {
     set({ settings: readSettings() })
