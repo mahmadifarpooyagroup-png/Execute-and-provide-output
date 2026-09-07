@@ -135,9 +135,16 @@ class GenericWebAdapter(IProviderAdapter):
         return await strategy.detect_auth_challenge()
 
     async def capture_evidence(self, *, screenshot: bool = False) -> dict[str, Any]:
-        await self._ready()
-        assert self.page is not None
-        dom = await self.page.evaluate(
+        page = self.page
+        if page is None or page.is_closed():
+            await self._ready()
+            page = self.page
+        if page is None:
+            raise RuntimeError("Web page is not initialized")
+        strategy = self.strategy
+        if strategy is None:
+            raise RuntimeError("Provider strategy is not initialized")
+        dom = await page.evaluate(
             """
             () => {
                 const clone = document.body.cloneNode(true);
@@ -153,14 +160,14 @@ class GenericWebAdapter(IProviderAdapter):
             """
         )
         evidence: dict[str, Any] = {
-            "response_text": await self.strategy.extract_response(),  # type: ignore[union-attr]
-            "page_state": {"url": self.page.url, "title": await self.page.title()},
+            "response_text": await strategy.extract_response(),
+            "page_state": {"url": page.url, "title": await page.title()},
             "dom": self._redact_text(str(dom)),
             "operation_id": self._last_operation_id,
         }
         if screenshot:
             style_id = "atrin-evidence-redaction"
-            await self.page.evaluate(
+            await page.evaluate(
                 """
                 ([id, css]) => {
                     const existing = document.getElementById(id);
@@ -180,10 +187,10 @@ class GenericWebAdapter(IProviderAdapter):
                 ],
             )
             try:
-                screenshot_bytes = await self.page.screenshot()
+                screenshot_bytes = await page.screenshot()
                 evidence["screenshot"] = base64.b64encode(screenshot_bytes).decode("ascii")
             finally:
-                await self.page.evaluate("(id) => document.getElementById(id)?.remove()", style_id)
+                await page.evaluate("(id) => document.getElementById(id)?.remove()", style_id)
         return evidence
 
     @staticmethod
@@ -241,8 +248,10 @@ class GenericWebAdapter(IProviderAdapter):
     async def _ready(self) -> ProviderInteractionStrategy:
         if not self.strategy or not self.page or self.page.is_closed():
             await self.launch()
-        assert self.strategy is not None
-        return self.strategy
+        strategy = self.strategy
+        if strategy is None:
+            raise RuntimeError("Provider strategy is not initialized")
+        return strategy
 
     def _check_fencing_token(self, supplied: Optional[int]) -> None:
         if self.current_fencing_token is None:
@@ -258,8 +267,10 @@ class GenericWebAdapter(IProviderAdapter):
             raise PermissionError("CDP_ATTACH requires explicit allow_cdp_attach=True")
 
     def _select_attached_page(self, target_url: Optional[str]) -> tuple[BrowserContext, Page]:
-        assert self.browser is not None
-        contexts = self.browser.contexts
+        browser = self.browser
+        if browser is None:
+            raise RuntimeError("Browser is not initialized for CDP attachment")
+        contexts = browser.contexts
         if not contexts:
             raise RuntimeError("attached browser has no context")
         context = contexts[0]
