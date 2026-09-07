@@ -6,7 +6,7 @@ import { useAppStore } from '../store/appStore'
 
 export function WorkflowsPage() {
   const { t } = useTranslation()
-  const { workflows, providers, loadWorkflows } = useAppStore()
+  const { workflows, providers, loadProviders, loadWorkflows } = useAppStore()
   const [busyWorkflow, setBusyWorkflow] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [goal, setGoal] = useState('')
@@ -22,8 +22,8 @@ export function WorkflowsPage() {
   const selectedProviderId = providerId || selectedProvider?.id || ''
 
   useEffect(() => {
-    void loadWorkflows().catch(() => undefined)
-  }, [loadWorkflows])
+    void Promise.all([loadProviders(), loadWorkflows()]).catch(() => undefined)
+  }, [loadProviders, loadWorkflows])
 
   useEffect(() => {
     const hasActive = workflows.some((workflow) => !['completed', 'cancelled'].includes(workflow.status))

@@ -97,6 +97,14 @@ function readSettings(): AppSettings {
   }
 }
 
+function persistSettings(settings: AppSettings): void {
+  try {
+    window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
+  } catch {
+    // Keep the in-memory setting usable when browser storage is restricted.
+  }
+}
+
 function providerStatus(provider: RuntimeProvider): ProviderStatus {
   switch (provider.auth_state.toUpperCase()) {
     case 'AUTHENTICATED':
@@ -240,7 +248,7 @@ export const useAppStore = create<AppState>((set) => ({
         : defaultSettings.retentionDays,
       notifications: Boolean(settings.notifications),
     }
-    window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(normalized))
+    persistSettings(normalized)
     set({ settings: normalized })
   },
 }))

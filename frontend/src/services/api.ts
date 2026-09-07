@@ -80,20 +80,42 @@ export interface RuntimeAuditItem {
   entry_hash: string
 }
 
+export class RuntimeApiError extends Error {
+  readonly status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'RuntimeApiError'
+    this.status = status
+  }
+}
+
 const API_BASE = (import.meta.env.VITE_ATRIN_API_URL || 'http://127.0.0.1:8765').replace(/\/$/, '')
 const TOKEN_STORAGE_KEY = 'atrin.runtime.token'
 const REQUEST_TIMEOUT_MS = 30_000
 
 export function getRuntimeToken(): string | null {
-  return window.sessionStorage.getItem(TOKEN_STORAGE_KEY)
+  try {
+    return window.sessionStorage.getItem(TOKEN_STORAGE_KEY)
+  } catch {
+    return null
+  }
 }
 
 export function setRuntimeToken(token: string): void {
-  window.sessionStorage.setItem(TOKEN_STORAGE_KEY, token)
+  try {
+    window.sessionStorage.setItem(TOKEN_STORAGE_KEY, token)
+  } catch {
+    throw new Error('Browser session storage is unavailable; the runtime token cannot be persisted')
+  }
 }
 
 export function clearRuntimeToken(): void {
-  window.sessionStorage.removeItem(TOKEN_STORAGE_KEY)
+  try {
+    window.sessionStorage.removeItem(TOKEN_STORAGE_KEY)
+  } catch {
+    // Ignore unavailable session storage during logout/cleanup.
+  }
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -120,7 +142,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       const detail = typeof payload === 'object' && payload !== null && 'detail' in payload
         ? String((payload as { detail: unknown }).detail)
         : `Runtime API request failed (${response.status})`
-      throw new Error(detail)
+      throw new RuntimeApiError(detail, response.status)
     }
     return payload as T
   } catch (error) {
@@ -157,11 +179,26 @@ export async function createProviderProfile(input: {
   account_id: string
   name: string
 }): Promise<RuntimeProvider> {
-  await request(`/api/v1/providers`, {
-    method: 'POST',
-    headers: { 'Idempotency-Key': `provider-profile:${input.profile_id}` },
-    body: JSON.stringify(input),
-  })
+  try {
+    await request(`/api/v1/providers`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': `provider-profile:${input.profile_id}` },
+      body: JSON.stringify(input),
+    })
+  } catch (error) {
+    if (error instanceof RuntimeApiError && error.status === 409) {
+      try {
+        const providers = await getProviders()
+        const existing = providers.find((provider) => provider.profile_id === input.profile_id)
+        if (existing && existing.provider_id === input.provider_id && existing.account_id === input.account_id && existing.name === input.name) {
+          return existing
+        }
+      } catch {
+        // Preserve the original conflict when the reconciliation lookup fails.
+      }
+    }
+    throw error
+  }
   const providers = await getProviders()
   const created = providers.find((provider) => provider.profile_id === input.profile_id)
   if (!created) throw new Error('Provider profile was created but could not be loaded')
