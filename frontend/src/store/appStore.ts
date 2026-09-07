@@ -81,11 +81,12 @@ function readSettings(): AppSettings {
     const raw = window.localStorage.getItem(SETTINGS_KEY)
     if (!raw) return defaultSettings
     const parsed = JSON.parse(raw) as Partial<AppSettings>
+    const retention = Number(parsed.retentionDays)
     return {
       theme: parsed.theme === 'light' ? 'light' : 'dark',
       autoRecover: parsed.autoRecover !== false,
-      retentionDays: Number.isFinite(parsed.retentionDays) && Number(parsed.retentionDays) >= 1
-        ? Math.min(3650, Number(parsed.retentionDays))
+      retentionDays: Number.isFinite(retention) && retention >= 1
+        ? Math.min(3650, Math.trunc(retention))
         : defaultSettings.retentionDays,
       notifications: parsed.notifications !== false,
     }
@@ -210,10 +211,13 @@ export const useAppStore = create<AppState>((set) => ({
   },
 
   saveSettings: (settings: AppSettings) => {
+    const retention = Number(settings.retentionDays)
     const normalized: AppSettings = {
       theme: settings.theme === 'light' ? 'light' : 'dark',
       autoRecover: Boolean(settings.autoRecover),
-      retentionDays: Math.min(3650, Math.max(1, Math.trunc(Number(settings.retentionDays) || defaultSettings.retentionDays)),
+      retentionDays: Number.isFinite(retention)
+        ? Math.min(3650, Math.max(1, Math.trunc(retention)))
+        : defaultSettings.retentionDays,
       notifications: Boolean(settings.notifications),
     }
     window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(normalized))
