@@ -37,6 +37,7 @@ line-length = 120
 # syntax modernization are formatter/refactoring concerns, not runtime risks.
 select = ["E", "F", "B"]
 ignore = ["E501"]
+per-file-ignores = {"atrin_core/runtime.py" = ["B008"]}
 
 [tool.mypy]
 python_version = "3.12"
