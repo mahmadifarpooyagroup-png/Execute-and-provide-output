@@ -1,11 +1,12 @@
 import { create } from 'zustand'
 import {
-  getDashboardOverview,
-  getProviders,
-  getRecoveryQueue,
-  getSettings,
-  getWorkflows,
-} from '../services/mockApi'
+  getProviders as getRuntimeProviders,
+  getRecoveryQueue as getRuntimeRecoveryQueue,
+  getWorkflows as getRuntimeWorkflows,
+  type RuntimeProvider,
+  type RuntimeRecoveryItem,
+  type RuntimeWorkflow,
+} from '../services/api'
 
 export type ProviderStatus = 'healthy' | 'warning' | 'offline'
 export type WorkflowStatus = 'running' | 'paused' | 'retrying' | 'completed'
@@ -73,6 +74,72 @@ const defaultSettings: AppSettings = {
   notifications: true,
 }
 
+function providerStatus(provider: RuntimeProvider): ProviderStatus {
+  switch (provider.auth_state.toUpperCase()) {
+    case 'AUTHENTICATED':
+      return 'healthy'
+    case 'AUTH_REQUIRED':
+    case 'WAITING_FOR_AUTH':
+      return 'warning'
+    default:
+      return 'offline'
+  }
+}
+
+function mapProvider(provider: RuntimeProvider): ProviderItem {
+  return {
+    id: provider.profile_id,
+    name: provider.name,
+    type: provider.provider_id,
+    status: providerStatus(provider),
+    lastSync: provider.updated_at,
+    capability: 'Runtime provider profile',
+  }
+}
+
+function workflowStatus(state: string): WorkflowStatus {
+  switch (state) {
+    case 'COMPLETED':
+      return 'completed'
+    case 'WAITING_FOR_AUTH':
+    case 'WAITING_FOR_NETWORK':
+    case 'WAITING_FOR_PROVIDER':
+    case 'WAITING_FOR_HUMAN_INTERACTION':
+    case 'WAITING_FOR_HUMAN_APPROVAL':
+      return 'paused'
+    case 'FAILED':
+    case 'REJECTED':
+      return 'retrying'
+    default:
+      return 'running'
+  }
+}
+
+function mapWorkflow(workflow: RuntimeWorkflow): WorkflowItem {
+  return {
+    id: workflow.workflow_id,
+    name: workflow.goal,
+    status: workflowStatus(workflow.state),
+    progress: workflow.state === 'COMPLETED' ? 100 : 0,
+    owner: 'Runtime',
+    updatedAt: workflow.updated_at,
+  }
+}
+
+function recoveryPriority(item: RuntimeRecoveryItem): RecoveryPriority {
+  return item.state === 'WAITING_FOR_PROVIDER' ? 'high' : 'medium'
+}
+
+function mapRecoveryItem(item: RuntimeRecoveryItem): RecoveryItem {
+  return {
+    id: item.workflow_id,
+    title: item.goal,
+    priority: recoveryPriority(item),
+    eta: '—',
+    owner: 'Runtime',
+  }
+}
+
 export const useAppStore = create<AppState>((set) => ({
   dashboard: null,
   providers: [],
@@ -82,27 +149,39 @@ export const useAppStore = create<AppState>((set) => ({
   isLoading: false,
 
   loadDashboard: async () => {
-    const dashboard = await getDashboardOverview()
+    const [providers, workflows, recoveryQueue] = await Promise.all([
+      getRuntimeProviders(),
+      getRuntimeWorkflows(),
+      getRuntimeRecoveryQueue(),
+    ])
+    const mappedProviders = providers.map(mapProvider)
+    const mappedWorkflows = workflows.map(mapWorkflow)
+    const dashboard: DashboardOverview = {
+      totalProviders: providers.length,
+      healthyProviders: mappedProviders.filter((provider) => provider.status === 'healthy').length,
+      activeWorkflows: mappedWorkflows.filter((workflow) => workflow.status !== 'completed').length,
+      alerts: recoveryQueue.length,
+      uptime: '—',
+    }
     set({ dashboard })
   },
 
   loadProviders: async () => {
-    const providers = await getProviders()
-    set({ providers })
+    const providers = await getRuntimeProviders()
+    set({ providers: providers.map(mapProvider) })
   },
 
   loadWorkflows: async () => {
-    const workflows = await getWorkflows()
-    set({ workflows })
+    const workflows = await getRuntimeWorkflows()
+    set({ workflows: workflows.map(mapWorkflow) })
   },
 
   loadRecoveryQueue: async () => {
-    const recoveryQueue = await getRecoveryQueue()
-    set({ recoveryQueue })
+    const recoveryQueue = await getRuntimeRecoveryQueue()
+    set({ recoveryQueue: recoveryQueue.map(mapRecoveryItem) })
   },
 
   loadSettings: async () => {
-    const settings = await getSettings()
-    set({ settings })
+    set({ settings: defaultSettings })
   },
 }))
