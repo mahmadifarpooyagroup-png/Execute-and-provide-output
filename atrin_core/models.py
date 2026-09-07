@@ -1,6 +1,7 @@
 from enum import Enum
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -53,23 +54,53 @@ class WorkflowState(str, Enum):
     FAILED = "FAILED"
 
 
+class StepStatus(str, Enum):
+    PENDING = "PENDING"
+    CLAIMED = "CLAIMED"
+    EXECUTING = "EXECUTING"
+    CONFIRMED = "CONFIRMED"
+    FAILED = "FAILED"
+    AMBIGUOUS = "AMBIGUOUS"
+    CANCELLED = "CANCELLED"
+
+
+class TaskStatus(str, Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    WAITING = "WAITING"
+
+
+class ExecutionStatus(str, Enum):
+    CREATED = "CREATED"
+    IN_PROGRESS = "IN_PROGRESS"
+    CONFIRMED = "CONFIRMED"
+    FAILED_BEFORE_DISPATCH = "FAILED_BEFORE_DISPATCH"
+    AMBIGUOUS = "AMBIGUOUS"
+    CANCELLED = "CANCELLED"
+
+
 class Step(BaseModel):
-    step_id: str
-    action: str
-    provider_id: str
-    idempotency_key: str = ""
-    status: str = "PENDING"
+    step_id: str = Field(min_length=1, max_length=256)
+    action: str = Field(min_length=1, max_length=10000)
+    provider_id: str = Field(min_length=1, max_length=256)
+    idempotency_key: str = Field(default="", max_length=512)
+    operation_id: Optional[str] = Field(default=None, max_length=128)
+    status: StepStatus = StepStatus.PENDING
     result: Optional[str] = None
     evidence: Optional[str] = None
     provider_profile_id: Optional[str] = None
-    fencing_token: Optional[int] = None
+    fencing_token: Optional[int] = Field(default=None, ge=0)
+    side_effecting: bool = True
 
 
 class Task(BaseModel):
-    task_id: str
-    description: str
+    task_id: str = Field(min_length=1, max_length=256)
+    description: str = Field(min_length=1, max_length=10000)
     steps: List[Step] = Field(default_factory=list)
-    status: str = "PENDING"
+    status: TaskStatus = TaskStatus.PENDING
 
 
 class Provider(BaseModel):
@@ -176,6 +207,7 @@ class IdempotencyRecord(BaseModel):
     workflow_id: str
     step_id: str
     provider_id: str
-    status: str
+    operation_id: Optional[str] = None
+    status: ExecutionStatus
     created_at: datetime
     confirmed_at: Optional[datetime] = None
