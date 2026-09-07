@@ -60,21 +60,45 @@ def test_pause_handlers_persist_distinct_waiting_states():
 
 def test_resume_confirmed_action_requests_skip_from_generic_controller():
     with tempfile.TemporaryDirectory() as temporary_directory:
-        _, store = make_store(temporary_directory, "wf-1")
+        database, store = make_store(temporary_directory, "wf-1")
         controller = MockController()
         verifier = MockVerifier("CONFIRMED")
         engine = RecoveryEngine(store, controller, verifier)
+        connection = database.get_connection()
+        try:
+            connection.execute(
+                "INSERT INTO tasks(task_id,workflow_id,description,status,order_index) VALUES (?,?,?,?,?)",
+                ("task-1", "wf-1", "recovery task", "RUNNING", 0),
+            )
+            connection.execute(
+                "INSERT INTO steps(step_id,task_id,action,provider_id,idempotency_key,operation_id,status,order_index) VALUES (?,?,?,?,?,?,?,?)",
+                ("step-1", "task-1", "action", "provider-1", "action-1", "operation-1", "EXECUTING", 0),
+            )
+            connection.execute(
+                "INSERT INTO idempotency_ledger(idempotency_key,workflow_id,step_id,provider_id,operation_id,status,confirmed_at) VALUES (?,?,?,?,?,'CONFIRMED',CURRENT_TIMESTAMP)",
+                ("action-1", "wf-1", "step-1", "provider-1", "operation-1"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
         asyncio.run(store.save("wf-1", {
             "action_idempotency_key": "action-1",
             "operation_id": "operation-1",
             "step_id": "step-1",
+            "checkpoint_version": 1,
         }))
-
         result = asyncio.run(engine.resume_from_checkpoint("wf-1"))
 
         assert result.skipped_action is True
-        assert controller.events[0][2] is True
+        assert controller.events == []
         assert verifier.keys == [("action-1", "operation-1")]
+        connection = database.get_connection()
+        try:
+            assert connection.execute("SELECT status FROM steps WHERE step_id='step-1'").fetchone()[0] == "CONFIRMED"
+            assert connection.execute("SELECT status FROM workflows WHERE workflow_id='wf-1'").fetchone()[0] == "COMPLETED"
+        finally:
+            connection.close()
 
 
 def test_resume_pauses_when_action_state_is_ambiguous():
