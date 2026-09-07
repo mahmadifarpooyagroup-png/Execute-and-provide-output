@@ -4,15 +4,22 @@ import { useAppStore } from '../store/appStore'
 
 export function DashboardPage() {
   const { t } = useTranslation()
-  const { dashboard, loadDashboard, providers, loadProviders } = useAppStore()
+  const { dashboard, loadDashboard, providers, isLoading, error } = useAppStore()
 
   useEffect(() => {
-    void loadDashboard()
-    void loadProviders()
-  }, [loadDashboard, loadProviders])
+    void loadDashboard().catch(() => undefined)
+  }, [loadDashboard])
 
   return (
     <section className="page-grid">
+      {isLoading && <div className="panel" role="status">{t('loading')}</div>}
+      {error && (
+        <div className="panel" role="alert">
+          <strong>{t('error')}</strong>
+          <div className="muted">{error}</div>
+        </div>
+      )}
+
       <div className="panel stats-grid">
         <div className="stat-card">
           <span>{t('total_providers')}</span>
@@ -28,7 +35,7 @@ export function DashboardPage() {
         </div>
         <div className="stat-card">
           <span>{t('uptime')}</span>
-          <strong>{dashboard?.uptime ?? '0%'}</strong>
+          <strong>{dashboard?.uptime ?? '—'}</strong>
         </div>
       </div>
 
@@ -44,6 +51,9 @@ export function DashboardPage() {
               <span className={`badge ${provider.status}`}>{provider.status}</span>
             </div>
           ))}
+          {!isLoading && !error && providers.length === 0 && (
+            <div className="muted">{t('no_data')}</div>
+          )}
         </div>
       </div>
     </section>
