@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from typing import Mapping, Optional
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .database import AtrinDatabase
@@ -16,6 +18,13 @@ from .workflow_engine import ActionAdapter, WorkflowEngine
 DB_PATH = os.getenv("ATRIN_DB_PATH", ".atrin_data/atrin.db")
 TOKEN_PATH = os.getenv("ATRIN_RUNTIME_TOKEN_PATH", ".atrin_data/runtime_secret.token")
 API_VERSION = "0.3.0"
+DEFAULT_ALLOWED_ORIGINS = (
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+    "tauri://localhost",
+)
 
 
 class WorkflowCreateRequest(BaseModel):
@@ -52,6 +61,14 @@ class SessionReleaseRequest(BaseModel):
     fencing_token: int = Field(ge=0)
 
 
+def _allowed_origins() -> list[str]:
+    configured = os.getenv("ATRIN_ALLOWED_ORIGINS")
+    if not configured:
+        return list(DEFAULT_ALLOWED_ORIGINS)
+    origins = [origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip()]
+    return origins or list(DEFAULT_ALLOWED_ORIGINS)
+
+
 def create_app(
     db_path: str = DB_PATH,
     token_path: str = TOKEN_PATH,
@@ -61,6 +78,13 @@ def create_app(
     session_manager = SessionManager(database)
     workflow_engine = WorkflowEngine(database, adapters=adapters, session_manager=session_manager)
     app = FastAPI(title="Atrin Local Control Plane", version=API_VERSION)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_allowed_origins(),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "X-Atrin-Token", "Idempotency-Key"],
+    )
 
     def get_security_manager() -> LocalSecurityManager:
         return LocalSecurityManager(token_file_path=token_path)
@@ -77,35 +101,28 @@ def create_app(
         return min(limit, 500), max(offset, 0)
 
     @app.get("/health")
-    async def health_check():
+    def health_check() -> dict[str, str]:
         return {"status": "healthy", "service": "atrin-control-plane", "version": app.version}
 
     @app.get("/api/v1/status")
-    async def get_status(authenticated: bool = Depends(require_auth)):
-        return {"status": "operational", "message": "Local runtime is secure and running", "database": db_path, "version": app.version}
+    def get_status(authenticated: bool = Depends(require_auth)) -> dict[str, str]:
+        return {"status": "operational", "message": "Local runtime is secure and running", "version": app.version}
 
     @app.post("/api/v1/workflows", status_code=201)
-    async def create_workflow(
+    def create_workflow(
         request: WorkflowCreateRequest,
         idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
         authenticated: bool = Depends(require_auth),
-    ):
+    ) -> dict[str, str]:
         try:
             workflow_id = workflow_engine.create_workflow(request.goal, request.plan, client_request_id=idempotency_key)
             return {"workflow_id": workflow_id, "state": WorkflowState.IDLE.value}
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         except RuntimeError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
+            raise HTTPException(status_code=409, detail="Workflow request conflicts with an existing execution") from error
 
-    @app.get("/api/v1/workflows")
-    async def list_workflows(
-        state: Optional[str] = Query(None),
-        limit: int = Query(100, ge=1, le=500),
-        offset: int = Query(0, ge=0),
-        authenticated: bool = Depends(require_auth),
-    ):
-        limit, offset = page_params(limit, offset)
+    def _list_workflows(state: Optional[str], limit: int, offset: int) -> dict:
         connection = database.get_connection()
         try:
             base_sql = """
@@ -134,9 +151,17 @@ def create_app(
         finally:
             connection.close()
 
-    @app.get("/api/v1/workflows/{workflow_id}")
-    async def get_workflow(workflow_id: str, authenticated: bool = Depends(require_auth)):
-        checkpoint = await workflow_engine.load(workflow_id)
+    @app.get("/api/v1/workflows")
+    def list_workflows(
+        state: Optional[str] = Query(None),
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+        authenticated: bool = Depends(require_auth),
+    ) -> dict:
+        limit, offset = page_params(limit, offset)
+        return _list_workflows(state, limit, offset)
+
+    def _get_workflow_detail(workflow_id: str) -> dict:
         connection = database.get_connection()
         try:
             workflow = connection.execute(
@@ -144,7 +169,7 @@ def create_app(
                 (workflow_id,),
             ).fetchone()
             if workflow is None:
-                raise HTTPException(status_code=404, detail="Workflow not found")
+                raise LookupError("Workflow not found")
             tasks = connection.execute(
                 "SELECT task_id, description, status, order_index FROM tasks WHERE workflow_id=? ORDER BY order_index",
                 (workflow_id,),
@@ -154,9 +179,22 @@ def create_app(
                 "FROM steps s JOIN tasks t ON t.task_id=s.task_id WHERE t.workflow_id=? ORDER BY t.order_index,s.order_index",
                 (workflow_id,),
             ).fetchall()
-            return {"workflow": dict(workflow), "tasks": [dict(row) for row in tasks], "steps": [dict(row) for row in steps], "checkpoint": checkpoint}
+            checkpoint = workflow_engine._load_in_connection(connection, workflow_id)
+            return {
+                "workflow": dict(workflow),
+                "tasks": [dict(row) for row in tasks],
+                "steps": [dict(row) for row in steps],
+                "checkpoint": checkpoint,
+            }
         finally:
             connection.close()
+
+    @app.get("/api/v1/workflows/{workflow_id}")
+    def get_workflow(workflow_id: str, authenticated: bool = Depends(require_auth)) -> dict:
+        try:
+            return _get_workflow_detail(workflow_id)
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
 
     @app.post("/api/v1/workflows/{workflow_id}/run")
     async def run_workflow_step(workflow_id: str, request: StepRunRequest, authenticated: bool = Depends(require_auth)):
@@ -168,7 +206,7 @@ def create_app(
         except PermissionError as error:
             raise HTTPException(status_code=403, detail=str(error)) from error
         except RuntimeError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
+            raise HTTPException(status_code=409, detail="Workflow execution could not be completed safely") from error
 
     @app.post("/api/v1/workflows/{workflow_id}/pause")
     async def pause_workflow(workflow_id: str, request: PauseRequest, authenticated: bool = Depends(require_auth)):
@@ -178,7 +216,7 @@ def create_app(
         except LookupError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
         except RuntimeError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
+            raise HTTPException(status_code=409, detail="Workflow cannot be paused in its current state") from error
 
     @app.post("/api/v1/workflows/{workflow_id}/resume")
     async def resume_workflow(workflow_id: str, authenticated: bool = Depends(require_auth)):
@@ -188,7 +226,7 @@ def create_app(
         except LookupError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
         except RuntimeError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
+            raise HTTPException(status_code=409, detail="Workflow cannot be resumed safely") from error
 
     @app.post("/api/v1/workflows/{workflow_id}/cancel")
     async def cancel_workflow(workflow_id: str, authenticated: bool = Depends(require_auth)):
@@ -198,11 +236,9 @@ def create_app(
         except LookupError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
         except RuntimeError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
+            raise HTTPException(status_code=409, detail="Workflow cancellation requires provider confirmation") from error
 
-    @app.get("/api/v1/providers")
-    async def list_provider_profiles(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0), authenticated: bool = Depends(require_auth)):
-        limit, offset = page_params(limit, offset)
+    def _list_provider_profiles(limit: int, offset: int) -> dict:
         connection = database.get_connection()
         try:
             rows = connection.execute(
@@ -214,17 +250,22 @@ def create_app(
         finally:
             connection.close()
 
+    @app.get("/api/v1/providers")
+    def list_provider_profiles(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0), authenticated: bool = Depends(require_auth)) -> dict:
+        limit, offset = page_params(limit, offset)
+        return _list_provider_profiles(limit, offset)
+
     @app.post("/api/v1/providers", status_code=201)
-    async def create_provider_profile(request: ProviderProfileCreateRequest, authenticated: bool = Depends(require_auth)):
+    def create_provider_profile(request: ProviderProfileCreateRequest, authenticated: bool = Depends(require_auth)):
         try:
             session_manager.create_profile(request.profile_id, request.provider_id, request.account_id, request.name)
             return {"profile_id": request.profile_id, "provider_id": request.provider_id}
-        except Exception as error:
-            raise HTTPException(status_code=409, detail="Provider profile could not be created") from error
+        except sqlite3.IntegrityError as error:
+            raise HTTPException(status_code=409, detail="Provider profile already exists or violates a database constraint") from error
+        except (ValueError, RuntimeError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
-    @app.get("/api/v1/sessions")
-    async def list_sessions(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0), authenticated: bool = Depends(require_auth)):
-        limit, offset = page_params(limit, offset)
+    def _list_sessions(limit: int, offset: int) -> dict:
         connection = database.get_connection()
         try:
             rows = connection.execute(
@@ -236,31 +277,34 @@ def create_app(
         finally:
             connection.close()
 
+    @app.get("/api/v1/sessions")
+    def list_sessions(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0), authenticated: bool = Depends(require_auth)) -> dict:
+        limit, offset = page_params(limit, offset)
+        return _list_sessions(limit, offset)
+
     @app.post("/api/v1/sessions/{profile_id}/acquire")
-    async def acquire_session(profile_id: str, request: SessionLockRequest, authenticated: bool = Depends(require_auth)):
+    def acquire_session(profile_id: str, request: SessionLockRequest, authenticated: bool = Depends(require_auth)):
         try:
             token = session_manager.acquire_lock(profile_id, request.workflow_id)
             return {"profile_id": profile_id, "workflow_id": request.workflow_id, "fencing_token": token}
         except LookupError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
         except RuntimeError as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
+            raise HTTPException(status_code=409, detail="Session lease is not available") from error
 
     @app.post("/api/v1/sessions/{profile_id}/renew")
-    async def renew_session(profile_id: str, request: SessionRenewRequest, authenticated: bool = Depends(require_auth)):
+    def renew_session(profile_id: str, request: SessionRenewRequest, authenticated: bool = Depends(require_auth)):
         if not session_manager.renew_lock(profile_id, request.workflow_id, request.fencing_token):
             raise HTTPException(status_code=409, detail="Session lease is not owned or is expired")
         return {"profile_id": profile_id, "workflow_id": request.workflow_id, "renewed": True}
 
     @app.post("/api/v1/sessions/{profile_id}/release")
-    async def release_session(profile_id: str, request: SessionReleaseRequest, authenticated: bool = Depends(require_auth)):
+    def release_session(profile_id: str, request: SessionReleaseRequest, authenticated: bool = Depends(require_auth)):
         if not session_manager.release_lock(profile_id, request.workflow_id, request.fencing_token):
             raise HTTPException(status_code=409, detail="Session lease is not owned by the supplied fencing token")
         return {"profile_id": profile_id, "workflow_id": request.workflow_id, "released": True}
 
-    @app.get("/api/v1/recovery")
-    async def list_recovery_items(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0), authenticated: bool = Depends(require_auth)):
-        limit, offset = page_params(limit, offset)
+    def _list_recovery_items(limit: int, offset: int) -> dict:
         states = (
             WorkflowState.WAITING_FOR_AUTH.value,
             WorkflowState.WAITING_FOR_NETWORK.value,
@@ -284,8 +328,13 @@ def create_app(
         finally:
             connection.close()
 
+    @app.get("/api/v1/recovery")
+    def list_recovery_items(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0), authenticated: bool = Depends(require_auth)) -> dict:
+        limit, offset = page_params(limit, offset)
+        return _list_recovery_items(limit, offset)
+
     @app.get("/api/v1/audit")
-    async def list_audit(workflow_id: Optional[str] = Query(None), limit: int = Query(100, ge=1, le=1000), authenticated: bool = Depends(require_auth)):
+    def list_audit(workflow_id: Optional[str] = Query(None), limit: int = Query(100, ge=1, le=1000), authenticated: bool = Depends(require_auth)) -> dict:
         connection = database.get_connection()
         try:
             if workflow_id:
@@ -303,16 +352,13 @@ def create_app(
             connection.close()
 
     @app.get("/api/v1/audit/verify")
-    async def verify_audit(authenticated: bool = Depends(require_auth)):
+    def verify_audit(authenticated: bool = Depends(require_auth)) -> dict[str, bool]:
         return {"valid": workflow_engine.validate_audit_chain()}
 
     return app
 
 
-app = create_app()
-
-
-def start_runtime(host: str = "127.0.0.1", port: int = 8765):
+def start_runtime(host: str = "127.0.0.1", port: int = 8765) -> None:
     if host not in {"127.0.0.1", "localhost"}:
         raise ValueError("Atrin runtime is intentionally local-only")
     uvicorn.run(create_app(), host=host, port=port, log_level="info")
