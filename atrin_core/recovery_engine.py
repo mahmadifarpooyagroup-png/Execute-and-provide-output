@@ -1,5 +1,7 @@
 """Vendor-neutral workflow pause, checkpoint, and resume support."""
 
+from __future__ import annotations
+
 import inspect
 import json
 from collections.abc import Mapping
@@ -42,16 +44,19 @@ class SQLiteCheckpointStore:
 
     def _ensure_table(self) -> None:
         connection = self.database.get_connection()
-        connection.execute("""
-            CREATE TABLE IF NOT EXISTS workflow_checkpoints (
-                workflow_id TEXT PRIMARY KEY,
-                checkpoint_version INTEGER NOT NULL,
-                payload TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-        """)
-        connection.commit()
-        connection.close()
+        try:
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS workflow_checkpoints (
+                    workflow_id TEXT PRIMARY KEY,
+                    checkpoint_version INTEGER NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 0,
+                    payload TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            connection.commit()
+        finally:
+            connection.close()
 
     async def save(self, workflow_id: str, checkpoint: Mapping[str, Any]) -> None:
         payload = _sanitize_checkpoint(checkpoint)
@@ -59,15 +64,33 @@ class SQLiteCheckpointStore:
         version = int(payload.get("checkpoint_version", 1))
         connection = self.database.get_connection()
         try:
-            connection.execute("""
-                INSERT INTO workflow_checkpoints (workflow_id, checkpoint_version, payload, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(workflow_id) DO UPDATE SET
-                    checkpoint_version = excluded.checkpoint_version,
-                    payload = excluded.payload,
-                    updated_at = excluded.updated_at
-            """, (workflow_id, version, json.dumps(payload), datetime.now(timezone.utc).isoformat()))
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT revision FROM workflow_checkpoints WHERE workflow_id=?", (workflow_id,)
+            ).fetchone()
+            if existing is None:
+                revision = 1
+                connection.execute(
+                    "INSERT INTO workflow_checkpoints(workflow_id,checkpoint_version,revision,payload,updated_at) "
+                    "VALUES (?,?,?,?,?)",
+                    (workflow_id, version, revision, json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                     datetime.now(timezone.utc).isoformat()),
+                )
+            else:
+                current = int(existing["revision"])
+                revision = current + 1
+                cursor = connection.execute(
+                    "UPDATE workflow_checkpoints SET checkpoint_version=?, revision=?, payload=?, updated_at=? "
+                    "WHERE workflow_id=? AND revision=?",
+                    (version, revision, json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                     datetime.now(timezone.utc).isoformat(), workflow_id, current),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("Checkpoint revision conflict")
             connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -75,7 +98,7 @@ class SQLiteCheckpointStore:
         connection = self.database.get_connection()
         try:
             row = connection.execute(
-                "SELECT payload FROM workflow_checkpoints WHERE workflow_id = ?", (workflow_id,)
+                "SELECT payload FROM workflow_checkpoints WHERE workflow_id=?", (workflow_id,)
             ).fetchone()
             return json.loads(row["payload"]) if row else None
         finally:
@@ -121,6 +144,10 @@ class RecoveryEngine:
     async def _pause(self, workflow_id: str, checkpoint: Mapping[str, Any], state: str) -> dict[str, Any]:
         persisted = dict(checkpoint)
         persisted.update({"workflow_id": workflow_id, "state": state})
+        atomic = getattr(self.workflow_controller, "pause_and_checkpoint", None)
+        if atomic is not None:
+            result = await _call(atomic, workflow_id, state, persisted)
+            return dict(result) if isinstance(result, Mapping) else persisted
         await _call(self.workflow_controller.pause_workflow, workflow_id, state)
         await _call(self.checkpoint_store.save, workflow_id, persisted)
         return persisted
@@ -154,8 +181,5 @@ class RecoveryEngine:
             await self._pause(workflow_id, checkpoint, WorkflowState.WAITING_FOR_NETWORK.value)
             return ResumeResult(workflow_id, status, resumed=False)
 
-        # Never silently treat an ambiguous external state as safe to replay.
-        # The workflow remains paused until a human/provider-specific verifier
-        # can establish whether the side effect happened.
         await self._pause(workflow_id, checkpoint, WorkflowState.WAITING_FOR_PROVIDER.value)
         return ResumeResult(workflow_id, status, resumed=False)
