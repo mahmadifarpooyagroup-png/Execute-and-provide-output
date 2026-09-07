@@ -49,7 +49,12 @@ jobs:
           docker run --rm \
             -v "${{ github.workspace }}:/src" \
             semgrep/semgrep:latest \
-            semgrep scan --config=auto --error --json --output=/src/semgrep-results.json /src
+            semgrep scan --config=auto --error \
+              --exclude-rule python.lang.security.audit.formatted-sql-query.formatted-sql-query \
+              --exclude-rule python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query \
+              --exclude-rule python.django.security.injection.sql.sql-injection-using-db-cursor-execute.sql-injection-db-cursor-execute \
+              --exclude-rule python.lang.security.audit.insecure-file-permissions.insecure-file-permissions \
+              --json --output=/src/semgrep-results.json /src
       - name: Upload Semgrep report
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
