@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from .database import AtrinDatabase
 from .models import Task, WorkflowState
+from .provider_registry import ProviderAdapterRegistry
 from .security import LocalSecurityManager
 from .session_manager import SessionManager
 from .workflow_engine import ActionAdapter, WorkflowEngine
@@ -73,10 +74,13 @@ def create_app(
     db_path: str = DB_PATH,
     token_path: str = TOKEN_PATH,
     adapters: Mapping[str, ActionAdapter] | None = None,
+    provider_registry: ProviderAdapterRegistry | None = None,
 ) -> FastAPI:
     database = AtrinDatabase(db_path)
     session_manager = SessionManager(database)
-    workflow_engine = WorkflowEngine(database, adapters=adapters, session_manager=session_manager)
+    registry = provider_registry or ProviderAdapterRegistry.from_environment()
+    effective_adapters = dict(adapters) if adapters is not None else registry.build_adapters(database)
+    workflow_engine = WorkflowEngine(database, adapters=effective_adapters, session_manager=session_manager)
     app = FastAPI(title="Atrin Local Control Plane", version=API_VERSION)
     app.add_middleware(
         CORSMiddleware,
@@ -107,6 +111,10 @@ def create_app(
     @app.get("/api/v1/status")
     def get_status(authenticated: bool = Depends(require_auth)) -> dict[str, str]:
         return {"status": "operational", "message": "Local runtime is secure and running", "version": app.version}
+
+    @app.get("/api/v1/provider-catalog")
+    def provider_catalog(authenticated: bool = Depends(require_auth)) -> dict:
+        return {"items": registry.catalog()}
 
     @app.post("/api/v1/workflows", status_code=201)
     def create_workflow(
@@ -258,6 +266,8 @@ def create_app(
     @app.post("/api/v1/providers", status_code=201)
     def create_provider_profile(request: ProviderProfileCreateRequest, authenticated: bool = Depends(require_auth)):
         try:
+            if registry.providers and request.provider_id not in registry.providers:
+                raise ValueError(f"Provider is not configured: {request.provider_id}")
             session_manager.create_profile(request.profile_id, request.provider_id, request.account_id, request.name)
             return {"profile_id": request.profile_id, "provider_id": request.provider_id}
         except sqlite3.IntegrityError as error:
