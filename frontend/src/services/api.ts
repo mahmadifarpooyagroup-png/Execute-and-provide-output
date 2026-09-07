@@ -79,11 +79,16 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return payload as T
 }
 
-export function isRuntimeApiAvailable(): boolean {
-  return Boolean(API_BASE)
+export async function isRuntimeApiAvailable(): Promise<boolean> {
+  try {
+    await getStatus()
+    return true
+  } catch {
+    return false
+  }
 }
 
-export async function getStatus(): Promise<{ status: string; message: string; database: string; version: string }> {
+export async function getStatus(): Promise<{ status: string; message: string; version: string }> {
   return request('/api/v1/status')
 }
 

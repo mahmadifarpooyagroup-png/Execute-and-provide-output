@@ -215,10 +215,18 @@ class PluginManager:
         return [dict(self._metadata[plugin_id]) for plugin_id in self._plugins]
 
     def set_active(self, plugin_id: str, active: bool) -> None:
-        if plugin_id not in self._plugins and self.database is not None:
-            raise KeyError(f"Plugin is not registered: {plugin_id}")
         if self.database is None:
+            if plugin_id not in self._plugins:
+                raise KeyError(f"Plugin is not registered: {plugin_id}")
+            if not active:
+                proxy = self._plugins.pop(plugin_id)
+                self._metadata.pop(plugin_id, None)
+                proxy.cleanup()
             return
+
+        if plugin_id not in self._plugins:
+            raise KeyError(f"Plugin is not registered: {plugin_id}")
+
         connection = self.database.get_connection()
         try:
             cursor = connection.execute(
@@ -230,6 +238,11 @@ class PluginManager:
             connection.commit()
         finally:
             connection.close()
+
+        if not active:
+            proxy = self._plugins.pop(plugin_id)
+            self._metadata.pop(plugin_id, None)
+            proxy.cleanup()
 
     def _persist_plugin(self, plugin_id: str, path: Path, metadata: dict[str, str]) -> None:
         if self.database is None:

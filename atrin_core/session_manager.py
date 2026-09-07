@@ -52,7 +52,7 @@ class SessionManager:
         conn = self.db.get_connection()
         try:
             conn.execute(
-                "INSERT OR IGNORE INTO provider_profiles "
+                "INSERT INTO provider_profiles "
                 "(id, provider_id, account_id, name, auth_state, fencing_token) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (profile_id, provider_id, account_id, name, AuthState.UNKNOWN.value, 0),
