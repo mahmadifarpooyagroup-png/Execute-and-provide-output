@@ -45,6 +45,7 @@
   "choose_workflow_defaults": "Choose workflow defaults",
   "launch_control_plane": "Launch control plane",
   "continue_setup": "Continue setup",
+  "main_navigation": "Main navigation",
   "provider": "Provider",
   "profile_id": "Profile ID",
   "profile_id_placeholder": "Unique local profile ID",
