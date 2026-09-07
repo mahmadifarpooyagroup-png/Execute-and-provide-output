@@ -30,6 +30,18 @@ class FakeStorage:
         return self.objects[remote_id]
 
 
+def create_workflow_parent(database: AtrinDatabase, workflow_id: str = "workflow-1"):
+    connection = database.get_connection()
+    try:
+        connection.execute(
+            "INSERT INTO workflows(workflow_id, goal, state) VALUES (?, ?, ?)",
+            (workflow_id, "sync test", "IDLE"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 @pytest.fixture
 def manager(tmp_path):
     checkpoint = {
@@ -39,7 +51,9 @@ def manager(tmp_path):
         "checkpoint_version": 2,
     }
     storage = FakeStorage()
-    manager = CloudSyncManager(FakeRecoveryEngine(checkpoint), AtrinDatabase(str(tmp_path / "atrin.db")), storage)
+    database = AtrinDatabase(str(tmp_path / "atrin.db"))
+    create_workflow_parent(database)
+    manager = CloudSyncManager(FakeRecoveryEngine(checkpoint), database, storage)
     manager.configure_provider("local_network", {"path": str(tmp_path / "remote"), "encryption_key": "user secret"})
     manager.storage_provider = storage
     return manager, storage
@@ -48,9 +62,7 @@ def manager(tmp_path):
 def test_encryption_roundtrip(manager):
     cloud_sync, _ = manager
     payload = {"state": "EXECUTING", "items": [1, 2, 3]}
-
     encrypted = cloud_sync.encrypt_payload(payload)
-
     assert encrypted != str(payload).encode()
     assert cloud_sync.decrypt_payload(encrypted) == payload
 
@@ -58,10 +70,8 @@ def test_encryption_roundtrip(manager):
 @pytest.mark.asyncio
 async def test_push_and_pull_checkpoint(manager):
     cloud_sync, storage = manager
-
     status = await cloud_sync.push_checkpoint("workflow-1")
     checkpoint = await cloud_sync.pull_checkpoint("workflow-1")
-
     assert status.sync_direction == "PUSH"
     assert checkpoint["workflow_id"] == "workflow-1"
     assert len(storage.objects) == 1
@@ -72,7 +82,9 @@ async def test_pull_reports_newer_remote_conflict(tmp_path):
     local = {"workflow_id": "workflow-1", "updated_at": "2026-09-04T10:00:00+00:00"}
     remote = {"workflow_id": "workflow-1", "updated_at": "2026-09-04T11:00:00+00:00"}
     storage = FakeStorage()
-    manager = CloudSyncManager(FakeRecoveryEngine(local), AtrinDatabase(str(tmp_path / "atrin.db")), storage)
+    database = AtrinDatabase(str(tmp_path / "atrin.db"))
+    create_workflow_parent(database)
+    manager = CloudSyncManager(FakeRecoveryEngine(local), database, storage)
     manager.configure_provider("webdav", {"endpoint_url": "https://sync.example.test/dav", "encryption_key": "user secret"})
     manager.storage_provider = storage
     storage.objects["checkpoints/workflow-1.checkpoint"] = manager.encrypt_payload({
@@ -82,12 +94,15 @@ async def test_pull_reports_newer_remote_conflict(tmp_path):
     })
 
     result = await manager.pull_checkpoint("workflow-1")
-
     assert result["conflict"] is True
     assert result["local_timestamp"] == local["updated_at"]
     assert result["remote_timestamp"] == remote["updated_at"]
-    row = manager.database.get_connection().execute(
-        "SELECT sync_status, conflict_flag FROM sync_metadata WHERE workflow_id = ?", ("workflow-1",)
-    ).fetchone()
-    assert row["sync_status"] == "CONFLICT"
-    assert row["conflict_flag"] == 1
+    connection = manager.database.get_connection()
+    try:
+        row = connection.execute(
+            "SELECT sync_status, conflict_flag FROM sync_metadata WHERE workflow_id=?", ("workflow-1",)
+        ).fetchone()
+        assert row["sync_status"] == "CONFLICT"
+        assert row["conflict_flag"] == 1
+    finally:
+        connection.close()
