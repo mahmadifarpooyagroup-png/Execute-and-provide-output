@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { Layout } from './components/Layout'
 import { DashboardPage } from './pages/Dashboard'
 import { FirstRunWizardPage } from './pages/FirstRunWizard'
@@ -8,6 +8,7 @@ import { RecoveryCenterPage } from './pages/RecoveryCenter'
 import { SettingsPage } from './pages/Settings'
 import { WorkflowsPage } from './pages/Workflows'
 import { startDesktopRuntime } from './services/desktopRuntime'
+import { isWizardComplete } from './services/wizardState'
 
 function App() {
   useEffect(() => {
@@ -17,11 +18,16 @@ function App() {
     })
   }, [])
 
+  const wizardDone = isWizardComplete()
+
   return (
     <BrowserRouter>
       <Routes>
         <Route element={<Layout />}>
-          <Route path="/" element={<DashboardPage />} />
+          <Route
+            path="/"
+            element={<Navigate to={wizardDone ? '/dashboard' : '/wizard'} replace />}
+          />
           <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/providers" element={<ProvidersPage />} />
           <Route path="/workflows" element={<WorkflowsPage />} />

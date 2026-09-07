@@ -7,12 +7,13 @@ def _read_file(path: str) -> str:
 
 def test_major_ui_routes_and_wizard_are_declared():
     app_source = _read_file("frontend/src/App.tsx")
-    for route in ["/dashboard", "/providers", "/workflows", "/recovery", "/settings", "/first-run"]:
+    for route in ["/dashboard", "/providers", "/workflows", "/recovery", "/settings", "/wizard", "/first-run"]:
         assert route in app_source, f"Missing route declaration for {route}"
 
     wizard_source = _read_file("frontend/src/pages/FirstRunWizard.tsx")
     assert "first_run_wizard" in wizard_source
     assert "continue_setup" in wizard_source
+    assert 'data-testid="wizard-continue"' in wizard_source
 
 
 def test_provider_and_workflow_pages_use_runtime_store():
@@ -36,3 +37,25 @@ def test_dashboard_and_layout_components_are_present():
     assert "providers" in layout_source
     assert "recovery" in layout_source
     assert "settings" in layout_source
+
+
+def test_wizard_continue_is_wired_and_persists_completion():
+    wizard_source = _read_file("frontend/src/pages/FirstRunWizard.tsx")
+    state_source = _read_file("frontend/src/services/wizardState.ts")
+
+    assert "onClick={handleContinue}" in wizard_source
+    assert "activeIndex" in wizard_source
+    assert "markWizardComplete" in wizard_source
+    assert "navigate('/dashboard', { replace: true })" in wizard_source
+    assert "export function isWizardComplete" in state_source
+    assert "export function markWizardComplete" in state_source
+    assert "atrin.wizard.complete" in state_source
+
+
+def test_app_redirects_new_users_to_wizard():
+    app_source = _read_file("frontend/src/App.tsx")
+
+    assert "isWizardComplete" in app_source
+    assert "Navigate" in app_source
+    assert "/wizard" in app_source
+    assert "/dashboard" in app_source

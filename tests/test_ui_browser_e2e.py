@@ -89,11 +89,44 @@ def browser_servers(tmp_path_factory):
         stop_process(runtime)
 
 
-def seed_session(page: Page) -> None:
+def seed_session(page: Page, *, wizard_complete: bool = True) -> None:
+    wizard_script = (
+        "window.localStorage.setItem('atrin.wizard.complete', 'true');"
+        if wizard_complete
+        else "window.localStorage.removeItem('atrin.wizard.complete');"
+    )
     page.add_init_script(
         "window.sessionStorage.setItem('atrin.runtime.token', %r);"
-        "window.localStorage.setItem('i18nextLng', 'en');" % E2E_TOKEN
+        "window.localStorage.setItem('i18nextLng', 'en');"
+        "%s" % (E2E_TOKEN, wizard_script)
     )
+
+
+def test_first_run_wizard_progress_and_persistence(browser_servers):
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        page.set_default_timeout(10000)
+        page.set_default_navigation_timeout(30000)
+        seed_session(page, wizard_complete=False)
+        page.goto(FRONTEND_URL, wait_until="domcontentloaded")
+
+        page.get_by_test_id("wizard-continue").wait_for()
+        steps = page.locator(".wizard-step")
+        assert steps.count() == 4
+        assert steps.nth(0).get_attribute("class") == "wizard-step active"
+
+        for expected_active in range(1, 4):
+            page.get_by_test_id("wizard-continue").click()
+            assert steps.nth(expected_active).get_attribute("class") == "wizard-step active"
+
+        page.get_by_test_id("wizard-continue").click()
+        page.wait_for_url(f"{FRONTEND_URL}/dashboard")
+        assert page.evaluate("window.localStorage.getItem('atrin.wizard.complete')") == "true"
+
+        page.goto(FRONTEND_URL, wait_until="domcontentloaded")
+        page.wait_for_url(f"{FRONTEND_URL}/dashboard")
+        browser.close()
 
 
 def test_provider_and_workflow_journey(browser_servers):
@@ -104,10 +137,6 @@ def test_provider_and_workflow_journey(browser_servers):
         page.set_default_navigation_timeout(30000)
         seed_session(page)
         page.goto(FRONTEND_URL, wait_until="domcontentloaded")
-        page.evaluate(
-            "window.sessionStorage.setItem('atrin.runtime.token', %r);"
-            "window.localStorage.setItem('i18nextLng', 'en');" % E2E_TOKEN
-        )
         page.reload(wait_until="domcontentloaded")
 
         page.get_by_role("link", name="Providers").click()

@@ -4,6 +4,7 @@
 
 - [v2.3.0](#v230)
 - [Breaking Changes](#breaking-changes)
+- [Resolved Issues](#resolved-issues)
 - [Known Issues](#known-issues)
 
 ## v2.3.0
@@ -53,6 +54,7 @@ Atrin v2.3 completes the implementation described by the master specification.
 - Added provider-scoped idempotency ownership checks and expired-claim verification before reclaim.
 - Added checkpoint revision checks to prevent lost updates during concurrent recovery.
 - Added explicit verifier-confirmation audit events and ambiguous-action pause handling.
+- Wired first-run wizard progression, completion persistence, and root-route redirection.
 
 ## Breaking Changes
 
@@ -61,12 +63,19 @@ Atrin v2.3 completes the implementation described by the master specification.
 - Operational routes are intentionally local and must be protected before any remote exposure.
 - Windows packaging requires a Windows build environment with Rust stable, WebView2, and the required native build tools.
 
+## Resolved Issues
+
+- ~~The first-run wizard was navigable, but its Continue setup action was not wired to persistence.~~
+  **Fixed:** The wizard now advances through all four stages, persists completion to `localStorage`, and redirects the user to the dashboard on completion. The root route sends incomplete users to `/wizard` and returning users to `/dashboard`.
+- ~~The Windows installer had not been built in the current Linux/Codespace environment.~~
+  **Fixed:** CI builds the NSIS installer on a dedicated Windows runner and uploads the installer artifact.
+
 ## Known Issues
 
-- External provider and real API calls remain deterministic adapter implementations in the test environment; production provider credentials and endpoints still need deployment-specific configuration.
-- The first-run wizard is navigable, but its Continue setup action is not wired to persistence.
-- UI smoke tests validate source-level bindings and route declarations; they do not replace full production-browser acceptance.
+- External provider and real API calls still require deployment-specific provider credentials, endpoints, browser profiles, and environment validation; CI uses deterministic providers for safe automated verification.
+- Source-level UI smoke tests complement the real Playwright browser journey; neither validates every arbitrary production provider or account configuration.
 - The repository does not ship a Dockerfile, compose file, production service unit, or reverse-proxy configuration.
-- The Windows installer has not been built in the current Linux/Codespace environment.
+- Plugin worker isolation is not a full OS/container sandbox; untrusted third-party plugin uploads remain unsupported.
+- Browser profiles are sensitive credential stores and must be isolated per provider/account.
 
 For installation and operational work, see [INSTALLATION.md](INSTALLATION.md) and [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
