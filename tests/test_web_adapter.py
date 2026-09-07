@@ -35,8 +35,8 @@ class FakeStrategy(ProviderInteractionStrategy):
     async def detect_completion(self):
         return bool(await self.extract_response())
 
-    async def verify_action(self, idempotency_key):
-        return idempotency_key == "key-1" and await self.detect_completion()
+    async def verify_action(self, idempotency_key, *, operation_id=None):
+        return idempotency_key == "key-1" and operation_id == "operation-1" and await self.detect_completion()
 
 
 @pytest.mark.asyncio
@@ -45,7 +45,7 @@ async def test_browser_launch_and_message_round_trip(tmp_path):
     try:
         page = await adapter.launch()
         assert not page.is_closed()
-        result = await adapter.execute("hello", "key-1")
+        result = await adapter.execute("hello", "key-1", operation_id="operation-1")
         assert result["result"] == "hello"
         evidence = json.loads(result["evidence"])
         assert evidence["response_text"] == "hello"
@@ -107,9 +107,10 @@ async def test_verification_requires_same_action_identity(tmp_path):
     try:
         await adapter.launch()
         assert await adapter.verify_action("unknown-key") == "AMBIGUOUS"
-        await adapter.execute("hello", "key-1")
-        assert await adapter.verify_action("key-1") == "CONFIRMED"
-        assert await adapter.verify_action("key-2") == "AMBIGUOUS"
+        await adapter.execute("hello", "key-1", operation_id="operation-1")
+        assert await adapter.verify_action("key-1", operation_id="operation-1") == "CONFIRMED"
+        assert await adapter.verify_action("key-1", operation_id="operation-2") == "AMBIGUOUS"
+        assert await adapter.verify_action("key-2", operation_id="operation-1") == "AMBIGUOUS"
     finally:
         await adapter.close()
 
