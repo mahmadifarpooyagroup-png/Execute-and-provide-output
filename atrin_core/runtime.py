@@ -115,14 +115,14 @@ def create_app(
                 FROM workflows w
                 LEFT JOIN tasks t ON t.workflow_id=w.workflow_id
             """
-            params: list[object] = []
             if state:
                 query = base_sql + " WHERE w.state=? GROUP BY w.workflow_id ORDER BY w.updated_at DESC LIMIT ? OFFSET ?"
-                params.extend([state, limit, offset])
+                rows = connection.execute(query, (state, limit, offset)).fetchall()
+                total_row = connection.execute("SELECT COUNT(*) AS n FROM workflows WHERE state=?", (state,)).fetchone()
             else:
                 query = base_sql + " GROUP BY w.workflow_id ORDER BY w.updated_at DESC LIMIT ? OFFSET ?"
-                params.extend([limit, offset])
-            rows = connection.execute(query, params).fetchall()
+                rows = connection.execute(query, (limit, offset)).fetchall()
+                total_row = connection.execute("SELECT COUNT(*) AS n FROM workflows").fetchone()
             items = []
             for row in rows:
                 item = dict(row)
@@ -130,7 +130,6 @@ def create_app(
                 completed = int(item.pop("completed_task_count") or 0)
                 item["progress"] = 100 if item["state"] == WorkflowState.COMPLETED.value else (round(completed * 100 / total) if total else 0)
                 items.append(item)
-            total_row = connection.execute("SELECT COUNT(*) AS n FROM workflows" + (" WHERE state=?" if state else ""), ([state] if state else [])).fetchone()
             return {"items": items, "limit": limit, "offset": offset, "total": int(total_row["n"])}
         finally:
             connection.close()
@@ -262,19 +261,25 @@ def create_app(
     @app.get("/api/v1/recovery")
     async def list_recovery_items(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0), authenticated: bool = Depends(require_auth)):
         limit, offset = page_params(limit, offset)
-        waiting_states = tuple(s.value for s in (
-            WorkflowState.WAITING_FOR_AUTH, WorkflowState.WAITING_FOR_NETWORK,
-            WorkflowState.WAITING_FOR_PROVIDER, WorkflowState.WAITING_FOR_HUMAN_INTERACTION,
-            WorkflowState.WAITING_FOR_HUMAN_APPROVAL, WorkflowState.RECOVERING,
-        ))
+        states = (
+            WorkflowState.WAITING_FOR_AUTH.value,
+            WorkflowState.WAITING_FOR_NETWORK.value,
+            WorkflowState.WAITING_FOR_PROVIDER.value,
+            WorkflowState.WAITING_FOR_HUMAN_INTERACTION.value,
+            WorkflowState.WAITING_FOR_HUMAN_APPROVAL.value,
+            WorkflowState.RECOVERING.value,
+        )
         connection = database.get_connection()
         try:
-            placeholders = ",".join("?" for _ in waiting_states)
             rows = connection.execute(
-                f"SELECT workflow_id, goal, state, updated_at FROM workflows WHERE state IN ({placeholders}) ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-                [*waiting_states, limit, offset],
+                "SELECT workflow_id, goal, state, updated_at FROM workflows "
+                "WHERE state IN (?, ?, ?, ?, ?, ?) ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                (*states, limit, offset),
             ).fetchall()
-            total = connection.execute(f"SELECT COUNT(*) AS n FROM workflows WHERE state IN ({placeholders})", waiting_states).fetchone()["n"]
+            total = connection.execute(
+                "SELECT COUNT(*) AS n FROM workflows WHERE state IN (?, ?, ?, ?, ?, ?)",
+                states,
+            ).fetchone()["n"]
             return {"items": [dict(row) for row in rows], "limit": limit, "offset": offset, "total": int(total)}
         finally:
             connection.close()
