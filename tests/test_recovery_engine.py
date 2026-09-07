@@ -43,18 +43,18 @@ def make_store(temporary_directory, workflow_id):
 
 def test_pause_handlers_persist_distinct_waiting_states():
     with tempfile.TemporaryDirectory() as temporary_directory:
-        _, store = make_store(temporary_directory, "wf-1")
-        database, _ = make_store(temporary_directory, "wf-2")
+        database, store = make_store(temporary_directory, "wf-1")
+        _, store_2 = make_store(temporary_directory, "wf-2")
         controller = MockController()
         engine = RecoveryEngine(store, controller)
         checkpoint = {"step_id": "step-1", "checkpoint_version": 1}
 
         asyncio.run(engine.handle_network_unavailable("wf-1", checkpoint))
-        engine2 = RecoveryEngine(SQLiteCheckpointStore(database), controller)
+        engine2 = RecoveryEngine(store_2, controller)
         asyncio.run(engine2.handle_auth_required("wf-2", checkpoint))
 
         assert asyncio.run(store.load("wf-1"))["state"] == "WAITING_FOR_NETWORK"
-        assert asyncio.run(SQLiteCheckpointStore(database).load("wf-2"))["state"] == "WAITING_FOR_AUTH"
+        assert asyncio.run(store_2.load("wf-2"))["state"] == "WAITING_FOR_AUTH"
         assert [event[0] for event in controller.events] == ["pause", "pause"]
 
 
@@ -96,7 +96,7 @@ def test_resume_confirmed_action_requests_skip_from_generic_controller():
         connection = database.get_connection()
         try:
             assert connection.execute("SELECT status FROM steps WHERE step_id='step-1'").fetchone()[0] == "CONFIRMED"
-            assert connection.execute("SELECT status FROM workflows WHERE workflow_id='wf-1'").fetchone()[0] == "COMPLETED"
+            assert connection.execute("SELECT state FROM workflows WHERE workflow_id='wf-1'").fetchone()[0] == "COMPLETED"
         finally:
             connection.close()
 
