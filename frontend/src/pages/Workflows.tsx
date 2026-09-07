@@ -1,4 +1,5 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import type { FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { cancelWorkflow, createWorkflow, getWorkflowDetail, pauseWorkflow, resumeWorkflow, runWorkflowStep } from '../services/api'
 import { useAppStore } from '../store/appStore'
