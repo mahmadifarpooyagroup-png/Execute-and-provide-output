@@ -137,19 +137,20 @@ class _PluginProxy(IPlugin):
 
 
 class PluginManager:
-    """Validate plugins and run them in isolated worker processes."""
+    """Validate plugins, persist metadata, and run plugins in isolated worker processes."""
 
     _BLOCKED_IMPORTS = {
         "builtins", "ctypes", "importlib", "os", "pathlib", "shutil", "socket", "subprocess", "sys",
     }
     _BLOCKED_CALLS = {"__import__", "compile", "eval", "exec", "input", "open"}
 
-    def __init__(self, worker_timeout: float = 30.0):
+    def __init__(self, worker_timeout: float = 30.0, database: Any | None = None):
         self._plugins: dict[str, _PluginProxy] = {}
         self._metadata: dict[str, dict] = {}
         self.worker_timeout = worker_timeout
+        self.database = database
 
-    def register_plugin(self, plugin_path: str) -> str:
+    def register_plugin(self, plugin_path: str, *, persist: bool = True) -> str:
         path = Path(plugin_path).expanduser().resolve()
         if not path.is_file() or path.suffix != ".py":
             raise ValueError("Plugin path must point to a Python file")
@@ -164,7 +165,44 @@ class PluginManager:
             raise ValueError(f"Plugin is already registered: {plugin_id}")
         self._plugins[plugin_id] = proxy
         self._metadata[plugin_id] = dict(metadata)
+        if persist and self.database is not None:
+            self._persist_plugin(plugin_id, path, metadata)
         return plugin_id
+
+    def restore_plugins(self) -> list[str]:
+        if self.database is None:
+            return []
+        connection = self.database.get_connection()
+        try:
+            rows = connection.execute(
+                "SELECT plugin_id,name,version,path,sha256,is_active FROM plugins_registry WHERE is_active=1 ORDER BY name"
+            ).fetchall()
+        finally:
+            connection.close()
+        restored: list[str] = []
+        for row in rows:
+            path_value = row["path"]
+            expected_hash = row["sha256"]
+            if not isinstance(path_value, str) or not isinstance(expected_hash, str):
+                self._deactivate(row["plugin_id"])
+                continue
+            path = Path(path_value)
+            if not path.is_file() or self._file_hash(path) != expected_hash:
+                self._deactivate(row["plugin_id"])
+                continue
+            try:
+                plugin_id = self.register_plugin(str(path), persist=False)
+            except Exception:
+                self._deactivate(row["plugin_id"])
+                continue
+            if plugin_id != row["plugin_id"]:
+                self.get_plugin(plugin_id).cleanup()
+                self._plugins.pop(plugin_id, None)
+                self._metadata.pop(plugin_id, None)
+                self._deactivate(row["plugin_id"])
+                continue
+            restored.append(plugin_id)
+        return restored
 
     def get_plugin(self, plugin_id: str) -> IPlugin:
         try:
@@ -174,6 +212,58 @@ class PluginManager:
 
     def list_plugins(self) -> list[dict]:
         return [dict(self._metadata[plugin_id]) for plugin_id in self._plugins]
+
+    def set_active(self, plugin_id: str, active: bool) -> None:
+        if plugin_id not in self._plugins and self.database is not None:
+            raise KeyError(f"Plugin is not registered: {plugin_id}")
+        if self.database is None:
+            return
+        connection = self.database.get_connection()
+        try:
+            cursor = connection.execute(
+                "UPDATE plugins_registry SET is_active=?, updated_at=CURRENT_TIMESTAMP WHERE plugin_id=?",
+                (int(active), plugin_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"Plugin is not registered: {plugin_id}")
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _persist_plugin(self, plugin_id: str, path: Path, metadata: dict[str, str]) -> None:
+        connection = self.database.get_connection()
+        try:
+            connection.execute(
+                """INSERT INTO plugins_registry(plugin_id,name,version,path,sha256,is_active)
+                VALUES (?, ?, ?, ?, ?, 1)
+                ON CONFLICT(plugin_id) DO UPDATE SET name=excluded.name, version=excluded.version,
+                path=excluded.path, sha256=excluded.sha256, is_active=1, updated_at=CURRENT_TIMESTAMP""",
+                (plugin_id, metadata["name"], metadata["version"], str(path), self._file_hash(path)),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _deactivate(self, plugin_id: str) -> None:
+        if self.database is None:
+            return
+        connection = self.database.get_connection()
+        try:
+            connection.execute(
+                "UPDATE plugins_registry SET is_active=0, updated_at=CURRENT_TIMESTAMP WHERE plugin_id=?",
+                (plugin_id,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _file_hash(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     @classmethod
     def _validate_imports(cls, source: str, path: Path) -> None:
