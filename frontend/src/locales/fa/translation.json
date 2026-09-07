@@ -61,6 +61,7 @@
   "workflow_goal_placeholder": "اتریـن باید چه کاری انجام دهد؟",
   "workflow_action": "عملیات اول",
   "workflow_action_placeholder": "پیام یا عملیاتی برای ارائه‌دهنده انتخاب‌شده",
+  "side_effecting_action": "این عملیات وضعیت بیرونی را تغییر می‌دهد",
   "no_provider_profiles": "ابتدا یک پروفایل ارائه‌دهنده اضافه کنید.",
   "no_runnable_step": "برای این جریان کاری مرحله قابل اجرا وجود ندارد.",
   "run_next": "اجرای مرحله بعد"

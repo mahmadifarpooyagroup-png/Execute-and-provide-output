@@ -41,12 +41,19 @@ class GenericDesktopAdapter(IProviderAdapter):
             "message": str(error),
         })
 
+    async def _call_backend(self, method: Any, *args: Any, **kwargs: Any) -> Any:
+        result = method(*args, **kwargs)
+        return await result if inspect.isawaitable(result) else result
+
     async def launch_app(self, app_path: str) -> WindowInfo:
-        for name, backend in (("UIA", self.ui_automation_backend), ("ELECTRON", self.electron_backend)):
-            if backend is None:
+        for name, backend in (("UIA", self.ui_automation_backend), ("ELECTRON", self.electron_backend), ("CLI", self.cli_backend)):
+            method = getattr(backend, "launch_app", None) if backend is not None else None
+            if not callable(method):
                 continue
             try:
-                result = backend.launch_app(app_path)
+                result = await self._call_backend(method, app_path)
+                if not isinstance(result, WindowInfo):
+                    raise TypeError(f"{name}.launch_app must return WindowInfo")
                 self.windows[result.window_id] = result
                 self.desktop_state = "LAUNCHED"
                 self.workflow_checkpoint = {"workflow_state": self.workflow_state}
@@ -54,36 +61,23 @@ class GenericDesktopAdapter(IProviderAdapter):
                 return result
             except Exception as error:
                 self._record_fallback_error(f"{name}.launch", error)
-        if self.cli_backend is not None:
-            try:
-                window = WindowInfo(window_id="cli-window", title="CLI Fallback", process_name="cli", automation_id="cli-window")
-                self.windows[window.window_id] = window
-                self.desktop_state = "LAUNCHED"
-                self.last_strategy = "CLI"
-                return window
-            except Exception as error:
-                self._record_fallback_error("CLI.launch", error)
         raise RuntimeError(f"Could not launch app: {app_path}")
 
     async def attach_to_app(self, process_name: str) -> WindowInfo:
-        for name, backend in (("UIA", self.ui_automation_backend), ("ELECTRON", self.electron_backend)):
-            if backend is None:
+        for name, backend in (("UIA", self.ui_automation_backend), ("ELECTRON", self.electron_backend), ("CLI", self.cli_backend)):
+            method = getattr(backend, "attach_to_app", None) if backend is not None else None
+            if not callable(method):
                 continue
             try:
-                window = backend.attach_to_app(process_name)
+                window = await self._call_backend(method, process_name)
+                if not isinstance(window, WindowInfo):
+                    raise TypeError(f"{name}.attach_to_app must return WindowInfo")
                 self.windows[window.window_id] = window
                 self.desktop_state = "ATTACHED"
                 self.last_strategy = name
                 return window
             except Exception as error:
                 self._record_fallback_error(f"{name}.attach", error)
-        if self.cli_backend is not None and process_name:
-            fallback = WindowInfo(window_id=f"fallback-{process_name}", title=f"Fallback {process_name}",
-                                  process_name=process_name, automation_id=f"fallback-{process_name}")
-            self.windows[fallback.window_id] = fallback
-            self.desktop_state = "ATTACHED"
-            self.last_strategy = "CLI"
-            return fallback
         raise RuntimeError(f"Could not attach to process: {process_name}")
 
     async def focus_window(self, window_id: str) -> None:

@@ -82,6 +82,7 @@ export interface RuntimeAuditItem {
 
 const API_BASE = (import.meta.env.VITE_ATRIN_API_URL || 'http://127.0.0.1:8765').replace(/\/$/, '')
 const TOKEN_STORAGE_KEY = 'atrin.runtime.token'
+const REQUEST_TIMEOUT_MS = 30_000
 
 export function getRuntimeToken(): string | null {
   return window.sessionStorage.getItem(TOKEN_STORAGE_KEY)
@@ -102,23 +103,34 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
   if (token) headers.set('X-Atrin-Token', token)
 
-  const response = await fetch(`${API_BASE}${path}`, { ...init, headers })
-  const raw = await response.text()
-  let payload: unknown = null
-  if (raw) {
-    try {
-      payload = JSON.parse(raw)
-    } catch {
-      payload = raw
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  try {
+    const response = await fetch(`${API_BASE}${path}`, { ...init, headers, signal: controller.signal })
+    const raw = await response.text()
+    let payload: unknown = null
+    if (raw) {
+      try {
+        payload = JSON.parse(raw)
+      } catch {
+        payload = raw
+      }
     }
+    if (!response.ok) {
+      const detail = typeof payload === 'object' && payload !== null && 'detail' in payload
+        ? String((payload as { detail: unknown }).detail)
+        : `Runtime API request failed (${response.status})`
+      throw new Error(detail)
+    }
+    return payload as T
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error(`Runtime API request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`)
+    }
+    throw error
+  } finally {
+    window.clearTimeout(timeout)
   }
-  if (!response.ok) {
-    const detail = typeof payload === 'object' && payload !== null && 'detail' in payload
-      ? String((payload as { detail: unknown }).detail)
-      : `Runtime API request failed (${response.status})`
-    throw new Error(detail)
-  }
-  return payload as T
 }
 
 export async function isRuntimeApiAvailable(): Promise<boolean> {

@@ -12,6 +12,7 @@ export function WorkflowsPage() {
   const [goal, setGoal] = useState('')
   const [action, setAction] = useState('')
   const [providerId, setProviderId] = useState('')
+  const [sideEffecting, setSideEffecting] = useState(true)
   const [creating, setCreating] = useState(false)
 
   const selectedProvider = useMemo(
@@ -67,10 +68,11 @@ export function WorkflowsPage() {
         action: action.trim(),
         providerId: selectedProvider.type,
         providerProfileId: selectedProvider.id,
-        sideEffecting: false,
+        sideEffecting,
       }, `workflow-${crypto.randomUUID()}`)
       setGoal('')
       setAction('')
+      setSideEffecting(true)
       await refresh()
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : String(createError))
@@ -119,6 +121,15 @@ export function WorkflowsPage() {
             <label>
               <span>{t('workflow_action')}</span>
               <textarea className="setting-input" rows={5} value={action} onChange={(event) => setAction(event.target.value)} placeholder={t('workflow_action_placeholder')} required />
+            </label>
+            <label className="setting-row">
+              <span>{t('side_effecting_action')}</span>
+              <input
+                type="checkbox"
+                checked={sideEffecting}
+                onChange={(event) => setSideEffecting(event.target.checked)}
+                aria-label={t('side_effecting_action')}
+              />
             </label>
             <button className="primary-button" type="submit" disabled={creating || !selectedProvider}>
               {creating ? t('saving') : t('create_workflow')}

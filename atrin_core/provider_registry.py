@@ -73,8 +73,6 @@ class CompatibleChatAdapter(IProviderAdapter):
             "messages": [{"role": "user", "content": action}],
             **self.extra_body,
         }
-        if fencing_token is not None and "fencing_token" not in payload:
-            payload["fencing_token"] = fencing_token
         response = await self._client.post(
             f"{self.base_url}{self.chat_path}",
             json=payload,
@@ -153,10 +151,23 @@ class _ProfileAwareAdapter(IProviderAdapter):
         finally:
             connection.close()
 
+    def _current_fencing_token(self, profile_id: str) -> int:
+        connection = self.database.get_connection()
+        try:
+            row = connection.execute("SELECT fencing_token FROM provider_profiles WHERE id=?", (profile_id,)).fetchone()
+            if row is None:
+                raise LookupError(f"Provider profile not found: {profile_id}")
+            return int(row[0])
+        finally:
+            connection.close()
+
     async def _adapter(self, idempotency_key: str, operation_id: str | None) -> IProviderAdapter:
         profile_id = self._profile_id(idempotency_key, operation_id) or "default"
         if profile_id not in self._adapters:
-            self._adapters[profile_id] = self.factory(self.provider, profile_id)
+            adapter = self.factory(self.provider, profile_id)
+            if profile_id != "default" and hasattr(adapter, "current_fencing_token"):
+                setattr(adapter, "current_fencing_token", lambda: self._current_fencing_token(profile_id))
+            self._adapters[profile_id] = adapter
         return self._adapters[profile_id]
 
     async def execute(self, action: str, idempotency_key: str, *, operation_id: str | None = None, fencing_token: int | None = None) -> Any:
@@ -249,7 +260,7 @@ class ProviderAdapterRegistry:
         items: list[dict[str, Any]] = []
         for provider in sorted(self.providers.values(), key=lambda item: (item.priority, item.name, item.id)):
             capabilities = self.normalize_capabilities(provider.metadata.get("capabilities"))
-            if provider.adapter_id.lower() in {"api", "chat-completions", "openai-compatible"}:
+            if provider.adapter_id.lower() in {"api", "chat-completions", "openai-compatible", "generic"}:
                 capabilities.update({"chat", "text", "api"})
             elif provider.adapter_id.lower() in {"web", "generic-web"}:
                 capabilities.update({"web", "browser"})
@@ -349,6 +360,7 @@ ProviderAdapterRegistry.register_factory("generic-web", _web_factory)
 ProviderAdapterRegistry.register_factory("api", _api_factory)
 ProviderAdapterRegistry.register_factory("chat-completions", _api_factory)
 ProviderAdapterRegistry.register_factory("openai-compatible", _api_factory)
+ProviderAdapterRegistry.register_factory("generic", _api_factory)
 ProviderAdapterRegistry.register_factory("mcp", _mcp_factory)
 ProviderAdapterRegistry.register_factory("a2a", _a2a_factory)
 ProviderAdapterRegistry.register_factory("acp", _acp_factory)

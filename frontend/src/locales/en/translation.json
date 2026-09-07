@@ -61,6 +61,7 @@
   "workflow_goal_placeholder": "What should Atrin accomplish?",
   "workflow_action": "First action",
   "workflow_action_placeholder": "Message or action for the selected provider",
+  "side_effecting_action": "This action changes external state",
   "no_provider_profiles": "Add a provider profile before creating a workflow.",
   "no_runnable_step": "No runnable step is available for this workflow.",
   "run_next": "Run next"
