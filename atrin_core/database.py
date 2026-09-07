@@ -8,7 +8,7 @@ import uuid
 class AtrinDatabase:
     """SQLite persistence with per-connection safety pragmas and additive migrations."""
 
-    CURRENT_SCHEMA_VERSION = 5
+    CURRENT_SCHEMA_VERSION = 6
 
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -150,14 +150,17 @@ class AtrinDatabase:
                 plugin_id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 version TEXT NOT NULL,
+                path TEXT,
+                sha256 TEXT,
                 is_active BOOLEAN NOT NULL DEFAULT 1,
-                installed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                installed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
     def _backfill_operation_ids(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute(
-            "SELECT step_id, task_id FROM steps WHERE operation_id IS NULL OR operation_id=''"
+            "SELECT step_id FROM steps WHERE operation_id IS NULL OR operation_id=''"
         ).fetchall()
         for row in rows:
             operation_id = str(uuid.uuid4())
@@ -182,21 +185,35 @@ class AtrinDatabase:
                 "SELECT workflow_id FROM workflows WHERE client_request_id=? ORDER BY created_at, workflow_id",
                 (duplicate["client_request_id"],),
             ).fetchall()
-            # Preserve the oldest request identity and detach later legacy rows so
-            # the uniqueness guarantee can be added without destroying workflows.
             for row in rows[1:]:
                 conn.execute("UPDATE workflows SET client_request_id=NULL WHERE workflow_id=?", (row["workflow_id"],))
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
-        self._add_column_if_missing(conn, "idempotency_ledger", "claim_owner", "TEXT")
-        self._add_column_if_missing(conn, "idempotency_ledger", "attempt", "INTEGER NOT NULL DEFAULT 0")
-        self._add_column_if_missing(conn, "idempotency_ledger", "operation_id", "TEXT")
-        self._add_column_if_missing(conn, "steps", "provider_profile_id", "TEXT")
-        self._add_column_if_missing(conn, "steps", "fencing_token", "INTEGER")
-        self._add_column_if_missing(conn, "steps", "operation_id", "TEXT")
-        self._add_column_if_missing(conn, "steps", "side_effecting", "INTEGER NOT NULL DEFAULT 1")
+        for column, definition in (
+            ("confirmed_at", "TIMESTAMP"),
+            ("expires_at", "TIMESTAMP"),
+            ("claim_owner", "TEXT"),
+            ("attempt", "INTEGER NOT NULL DEFAULT 0"),
+            ("operation_id", "TEXT"),
+        ):
+            self._add_column_if_missing(conn, "idempotency_ledger", column, definition)
+
+        for column, definition in (
+            ("provider_profile_id", "TEXT"),
+            ("fencing_token", "INTEGER"),
+            ("operation_id", "TEXT"),
+            ("side_effecting", "INTEGER NOT NULL DEFAULT 1"),
+        ):
+            self._add_column_if_missing(conn, "steps", column, definition)
+
         self._add_column_if_missing(conn, "workflow_checkpoints", "revision", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_missing(conn, "workflows", "client_request_id", "TEXT")
+        for column, definition in (
+            ("path", "TEXT"),
+            ("sha256", "TEXT"),
+            ("updated_at", "TIMESTAMP"),
+        ):
+            self._add_column_if_missing(conn, "plugins_registry", column, definition)
 
         self._backfill_operation_ids(conn)
         self._repair_duplicate_request_ids(conn)
@@ -208,6 +225,7 @@ class AtrinDatabase:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_operation ON idempotency_ledger(operation_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_steps_workflow_order ON steps(task_id, order_index)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner_expiry ON sessions(lock_owner, lease_expiry)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_plugins_active ON plugins_registry(is_active)")
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS schema_metadata (
