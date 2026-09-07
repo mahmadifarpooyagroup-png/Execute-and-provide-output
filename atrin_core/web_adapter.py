@@ -159,12 +159,25 @@ class GenericWebAdapter(IProviderAdapter):
         }
         if screenshot:
             style_id = "atrin-evidence-redaction"
-            await self.page.add_style_tag(content=(
-                f"#{style_id}{{}} "
-                "input[type='password'], input[name*='token' i], input[name*='secret' i], "
-                "input[name*='authorization' i], [data-token], [data-secret] {"
-                "filter: blur(16px) !important; color: transparent !important; text-shadow: none !important; }"
-            ), id=style_id)
+            await self.page.evaluate(
+                """
+                ([id, css]) => {
+                    const existing = document.getElementById(id);
+                    if (existing) existing.remove();
+                    const style = document.createElement('style');
+                    style.id = id;
+                    style.textContent = css;
+                    document.head.appendChild(style);
+                }
+                """,
+                [
+                    style_id,
+                    "input[type='password'], input[name*='token' i], input[name*='secret' i], "
+                    "input[name*='authorization' i], [data-token], [data-secret] { "
+                    "filter: blur(16px) !important; color: transparent !important; "
+                    "text-shadow: none !important; }",
+                ],
+            )
             try:
                 evidence["screenshot"] = await self.page.screenshot(encoding="base64")
             finally:
@@ -210,17 +223,18 @@ class GenericWebAdapter(IProviderAdapter):
             return "AMBIGUOUS"
         if await strategy.detect_auth_challenge():
             return "AUTH_REQUIRED"
-        if await strategy.verify_action(idempotency_key):
+        if await strategy.verify_action(idempotency_key, operation_id=operation_id):
             return "CONFIRMED"
         return "AMBIGUOUS"
 
     async def cancel(self, idempotency_key: str, *, operation_id: str | None = None) -> bool:
-        # Generic web transport cannot safely infer how a provider cancels a
-        # submitted action. Provider-specific strategies should implement a real
-        # cancellation endpoint/UI when supported.
         if self._last_action_key != idempotency_key or self._last_operation_id != operation_id:
             return False
-        return False
+        cancel_method = getattr(self.strategy, "cancel_action", None) if self.strategy is not None else None
+        if not callable(cancel_method):
+            return False
+        result = cancel_method(idempotency_key, operation_id=operation_id)
+        return bool(await result if hasattr(result, "__await__") else result)
 
     async def _ready(self) -> ProviderInteractionStrategy:
         if not self.strategy or not self.page or self.page.is_closed():
