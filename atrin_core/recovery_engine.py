@@ -65,9 +65,7 @@ class SQLiteCheckpointStore:
         connection = self.database.get_connection()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                "SELECT revision FROM workflow_checkpoints WHERE workflow_id=?", (workflow_id,)
-            ).fetchone()
+            existing = connection.execute("SELECT revision FROM workflow_checkpoints WHERE workflow_id=?", (workflow_id,)).fetchone()
             now = datetime.now(timezone.utc).isoformat()
             if existing is None:
                 revision = 1
@@ -96,9 +94,7 @@ class SQLiteCheckpointStore:
     async def load(self, workflow_id: str) -> dict[str, Any] | None:
         connection = self.database.get_connection()
         try:
-            row = connection.execute(
-                "SELECT payload FROM workflow_checkpoints WHERE workflow_id=?", (workflow_id,)
-            ).fetchone()
+            row = connection.execute("SELECT payload FROM workflow_checkpoints WHERE workflow_id=?", (workflow_id,)).fetchone()
             return json.loads(row["payload"]) if row else None
         finally:
             connection.close()
@@ -164,7 +160,6 @@ class RecoveryEngine:
         database = getattr(self.workflow_controller, "database", None)
         if not isinstance(database, AtrinDatabase):
             raise RuntimeError("Durable workflow controller is required to finalize a verified operation")
-
         step_id = str(checkpoint.get("step_id") or "")
         key = str(checkpoint.get("action_idempotency_key") or "")
         if not step_id or not key:
@@ -173,14 +168,11 @@ class RecoveryEngine:
         connection = database.get_connection()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            workflow = connection.execute(
-                "SELECT state FROM workflows WHERE workflow_id=?", (workflow_id,)
-            ).fetchone()
+            workflow = connection.execute("SELECT state FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
             if workflow is None:
                 raise LookupError(f"Workflow not found: {workflow_id}")
             if workflow["state"] == WorkflowState.CANCELLED.value:
                 raise RuntimeError("Cancelled workflows are terminal and cannot be finalized")
-
             step = connection.execute("""
                 SELECT s.*, t.workflow_id
                 FROM steps s JOIN tasks t ON t.task_id=s.task_id
@@ -188,7 +180,6 @@ class RecoveryEngine:
             """, (step_id, workflow_id)).fetchone()
             if step is None or step["idempotency_key"] != key:
                 raise RuntimeError("Recovery checkpoint does not match the durable step")
-
             ledger = connection.execute(
                 "SELECT status, operation_id FROM idempotency_ledger WHERE idempotency_key=? AND workflow_id=? AND step_id=?",
                 (key, workflow_id, step_id),
@@ -197,11 +188,7 @@ class RecoveryEngine:
                 raise RuntimeError("Cannot finalize a verified action without a durable execution record")
             if ledger["operation_id"] not in (None, step["operation_id"]):
                 raise RuntimeError("Execution operation identity does not match the durable step")
-
-            connection.execute(
-                "UPDATE steps SET status=? WHERE step_id=?",
-                (StepStatus.CONFIRMED.value, step_id),
-            )
+            connection.execute("UPDATE steps SET status=? WHERE step_id=?", (StepStatus.CONFIRMED.value, step_id))
             connection.execute(
                 "UPDATE idempotency_ledger SET status=?, confirmed_at=CURRENT_TIMESTAMP, expires_at=NULL, claim_owner=NULL, operation_id=? WHERE idempotency_key=? AND workflow_id=? AND step_id=?",
                 (ExecutionStatus.CONFIRMED.value, step["operation_id"], key, workflow_id, step_id),
@@ -215,14 +202,10 @@ class RecoveryEngine:
                 (workflow_id, TaskStatus.COMPLETED.value),
             ).fetchone()["n"]
             final_state = WorkflowState.COMPLETED if remaining == 0 else WorkflowState.OBSERVING
-            connection.execute(
-                "UPDATE workflows SET state=?, updated_at=CURRENT_TIMESTAMP WHERE workflow_id=?",
-                (final_state.value, workflow_id),
-            )
-
+            connection.execute("UPDATE workflows SET state=?, updated_at=CURRENT_TIMESTAMP WHERE workflow_id=?",
+                               (final_state.value, workflow_id))
             row = connection.execute(
-                "SELECT revision, checkpoint_version FROM workflow_checkpoints WHERE workflow_id=?",
-                (workflow_id,),
+                "SELECT revision, checkpoint_version FROM workflow_checkpoints WHERE workflow_id=?", (workflow_id,)
             ).fetchone()
             revision = int(row["revision"]) + 1 if row else 1
             payload = dict(checkpoint)
@@ -242,7 +225,6 @@ class RecoveryEngine:
                     "INSERT INTO workflow_checkpoints(workflow_id,checkpoint_version,revision,payload,updated_at) VALUES (?,?,?,?,?)",
                     (workflow_id, version, revision, serialized, datetime.now(timezone.utc).isoformat()),
                 )
-
             audit = getattr(self.workflow_controller, "_audit", None)
             if callable(audit):
                 audit(connection, workflow_id, "ACTION_CONFIRMED_BY_VERIFIER", "recovery-engine",
@@ -260,35 +242,29 @@ class RecoveryEngine:
         checkpoint = await _call(self.checkpoint_store.load, workflow_id)
         if checkpoint is None:
             raise LookupError(f"No checkpoint found for workflow {workflow_id}")
-
         action_key = checkpoint.get("action_idempotency_key")
         operation_id = checkpoint.get("operation_id")
         verifier_obj = self.external_state_verifier
         if action_key and verifier_obj is None:
             raise RuntimeError("An external state verifier is required for side-effecting actions")
-
         status = "NOT_STARTED"
         if action_key:
-            assert verifier_obj is not None
+            if verifier_obj is None:
+                raise RuntimeError("An external state verifier is required for side-effecting actions")
             verifier = verifier_obj.verify_action
             kwargs = {"operation_id": operation_id} if _supports_keyword(verifier, "operation_id") else {}
             status = str(await _call(verifier, action_key, **kwargs)).upper()
-
         if status == "CONFIRMED":
             self._finalize_verified_durable_operation(workflow_id, checkpoint)
             return ResumeResult(workflow_id, status, resumed=True, skipped_action=True)
-
         if status in {"FAILED", "NOT_STARTED"}:
             await _call(self.workflow_controller.resume_workflow, workflow_id, checkpoint)
             return ResumeResult(workflow_id, status, resumed=True)
-
         if status in {"AUTH_REQUIRED", "LOGIN_REQUIRED", "AUTH_CHALLENGE"}:
             await self._pause(workflow_id, checkpoint, WorkflowState.WAITING_FOR_AUTH.value)
             return ResumeResult(workflow_id, status, resumed=False)
-
         if status in {"NETWORK_UNAVAILABLE", "NETWORK_ERROR", "TIMEOUT"}:
             await self._pause(workflow_id, checkpoint, WorkflowState.WAITING_FOR_NETWORK.value)
             return ResumeResult(workflow_id, status, resumed=False)
-
         await self._pause(workflow_id, checkpoint, WorkflowState.WAITING_FOR_PROVIDER.value)
         return ResumeResult(workflow_id, status, resumed=False)
