@@ -301,6 +301,30 @@
   margin-right: 8px;
 }
 
+.form-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.form-grid label {
+  display: grid;
+  gap: 7px;
+  color: #bfd0ea;
+  font-size: 0.84rem;
+}
+
+.form-grid .setting-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+}
+
+.form-grid textarea {
+  resize: vertical;
+  font: inherit;
+}
+
 .wizard-card {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
