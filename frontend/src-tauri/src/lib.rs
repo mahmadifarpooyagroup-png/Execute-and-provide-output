@@ -38,12 +38,21 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-fn find_python(resource_dir: &Path) -> Option<PathBuf> {
+fn find_python(resource_dir: &Path, app_data_dir: &Path) -> Option<PathBuf> {
     if let Ok(value) = std::env::var("ATRIN_PYTHON") {
         let candidate = PathBuf::from(value);
         if candidate.is_file() {
             return Some(candidate);
         }
+    }
+
+    let managed = if cfg!(target_os = "windows") {
+        app_data_dir.join("Atrin").join("runtime").join("venv").join("Scripts").join("python.exe")
+    } else {
+        app_data_dir.join("Atrin").join("runtime").join("venv").join("bin").join("python3")
+    };
+    if managed.is_file() {
+        return Some(managed);
     }
 
     let bundled = if cfg!(target_os = "windows") {
@@ -109,21 +118,21 @@ fn start_runtime(
         .path()
         .resource_dir()
         .map_err(|error| error.to_string())?;
-    let python = find_python(&resource_dir).ok_or_else(|| {
-        "Python runtime was not found. Install Python 3.12+ or provide ATRIN_PYTHON to the application."
-            .to_string()
-    })?;
-
     let data_dir = app
         .path()
         .app_local_data_dir()
         .map_err(|error| error.to_string())?;
     std::fs::create_dir_all(&data_dir)
         .map_err(|error| format!("Cannot create Atrin data directory: {error}"))?;
+
+    let python = find_python(&resource_dir, &data_dir).ok_or_else(|| {
+        "Python runtime was not found. Install Python 3.10+ or run ensure-python-runtime.ps1 once to create the managed Atrin runtime.".to_string()
+    })?;
+
     let db_path = data_dir.join("atrin.db");
     let token_path = data_dir.join("runtime_secret.token");
-
-    let child = Command::new(&python)
+    let mut command = Command::new(&python);
+    command
         .arg("-m")
         .arg("atrin_core.runtime")
         .current_dir(&resource_dir)
@@ -132,7 +141,18 @@ fn start_runtime(
         .env("ATRIN_RUNTIME_TOKEN_PATH", token_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+
+    if let Some(parent) = python.parent() {
+        let existing_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = vec![parent.to_path_buf()];
+        paths.extend(std::env::split_paths(&existing_path));
+        if let Ok(joined) = std::env::join_paths(paths) {
+            command.env("PATH", joined);
+        }
+    }
+
+    let child = command
         .spawn()
         .map_err(|error| format!("Failed to start Atrin runtime: {error}"))?;
 
