@@ -3,14 +3,10 @@ import json
 import pytest
 
 from atrin_core.provider_strategy import ProviderInteractionStrategy
-from atrin_core.web_adapter import (
-    BrowserMode,
-    GenericWebAdapter,
-    StaleFencingTokenError,
-)
+from atrin_core.web_adapter import BrowserMode, GenericWebAdapter, StaleFencingTokenError
 
 
-PAGE = "data:text/html,<html><body><input id='composer'><button id='send'>Send</button><div id='response' contenteditable='true' style='display:block;min-height:1em;border:1px solid #ccc;padding:4px;'></div></body></html>"
+PAGE = "data:text/html,<html><body><input id='composer'><button id='send'>Send</button><div id='response' contenteditable='true' style='display:block;min-height:1em;border:1px solid #ccc;padding:4px;'></div><input type='password' value='secret123'><span data-token='abc'>token=secret</span></body></html>"
 
 
 class FakeStrategy(ProviderInteractionStrategy):
@@ -27,12 +23,10 @@ class FakeStrategy(ProviderInteractionStrategy):
 
     async def send_message(self, text):
         await self.page.locator("#composer").fill(text)
-        await self.page.locator("#response").text_content()
         await self.page.evaluate("(text) => { document.getElementById('response').textContent = text; }", text)
 
     async def extract_response(self):
-        response = self.page.locator("#response")
-        text = await response.text_content()
+        text = await self.page.locator("#response").text_content()
         return text or ""
 
     async def detect_auth_challenge(self):
@@ -40,6 +34,9 @@ class FakeStrategy(ProviderInteractionStrategy):
 
     async def detect_completion(self):
         return bool(await self.extract_response())
+
+    async def verify_action(self, idempotency_key):
+        return idempotency_key == "key-1" and await self.detect_completion()
 
 
 @pytest.mark.asyncio
@@ -53,6 +50,7 @@ async def test_browser_launch_and_message_round_trip(tmp_path):
         evidence = json.loads(result["evidence"])
         assert evidence["response_text"] == "hello"
         assert "composer" in evidence["dom"]
+        assert "secret123" not in evidence["dom"]
     finally:
         await adapter.close()
 
@@ -81,12 +79,11 @@ async def test_persistent_profile_reuse(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_auth_detection_and_stale_fencing_token(tmp_path):
+async def test_auth_detection_and_exact_fencing(tmp_path):
     current_token = 2
     adapter = GenericWebAdapter(
         "provider", "profile", FakeStrategy, start_url=PAGE,
-        profile_path=str(tmp_path / "profile"),
-        current_fencing_token=lambda: current_token,
+        profile_path=str(tmp_path / "profile"), current_fencing_token=lambda: current_token,
     )
     try:
         await adapter.launch()
@@ -96,6 +93,23 @@ async def test_auth_detection_and_stale_fencing_token(tmp_path):
         assert await adapter.detect_auth_challenge() is True
         with pytest.raises(StaleFencingTokenError):
             await adapter.execute("blocked", "key-2", fencing_token=1)
+        with pytest.raises(StaleFencingTokenError):
+            await adapter.execute("blocked", "key-2", fencing_token=3)
+        with pytest.raises(StaleFencingTokenError):
+            await adapter.execute("blocked", "key-2")
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_verification_requires_same_action_identity(tmp_path):
+    adapter = GenericWebAdapter("provider", "profile", FakeStrategy, start_url=PAGE, profile_path=str(tmp_path / "profile"))
+    try:
+        await adapter.launch()
+        assert await adapter.verify_action("unknown-key") == "AMBIGUOUS"
+        await adapter.execute("hello", "key-1")
+        assert await adapter.verify_action("key-1") == "CONFIRMED"
+        assert await adapter.verify_action("key-2") == "AMBIGUOUS"
     finally:
         await adapter.close()
 
