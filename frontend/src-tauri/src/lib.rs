@@ -47,9 +47,19 @@ fn find_python(resource_dir: &Path, app_data_dir: &Path) -> Option<PathBuf> {
     }
 
     let managed = if cfg!(target_os = "windows") {
-        app_data_dir.join("Atrin").join("runtime").join("venv").join("Scripts").join("python.exe")
+        app_data_dir
+            .join("Atrin")
+            .join("runtime")
+            .join("venv")
+            .join("Scripts")
+            .join("python.exe")
     } else {
-        app_data_dir.join("Atrin").join("runtime").join("venv").join("bin").join("python3")
+        app_data_dir
+            .join("Atrin")
+            .join("runtime")
+            .join("venv")
+            .join("bin")
+            .join("python3")
     };
     if managed.is_file() {
         return Some(managed);
