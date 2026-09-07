@@ -72,7 +72,7 @@ def test_resume_skips_confirmed_side_effect():
         assert verifier.keys == ["action-1"]
 
 
-def test_resume_does_not_dispatch_while_action_is_in_progress():
+def test_resume_pauses_when_action_state_is_ambiguous():
     with tempfile.TemporaryDirectory() as temporary_directory:
         store = make_store(temporary_directory, "wf-1")
         controller = MockController()
@@ -82,4 +82,5 @@ def test_resume_does_not_dispatch_while_action_is_in_progress():
         result = asyncio.run(engine.resume_from_checkpoint("wf-1"))
 
         assert result.resumed is False
-        assert controller.events == []
+        assert controller.events == [("pause", "wf-1", "WAITING_FOR_PROVIDER")]
+        assert asyncio.run(store.load("wf-1"))["state"] == "WAITING_FOR_PROVIDER"
