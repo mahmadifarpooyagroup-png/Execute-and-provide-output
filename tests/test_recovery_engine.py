@@ -22,8 +22,8 @@ class MockVerifier:
         self.status = status
         self.keys = []
 
-    async def verify_action(self, idempotency_key):
-        self.keys.append(idempotency_key)
+    async def verify_action(self, idempotency_key, *, operation_id=None):
+        self.keys.append((idempotency_key, operation_id))
         return self.status
 
 
@@ -38,46 +38,51 @@ def make_store(temporary_directory, workflow_id):
         connection.commit()
     finally:
         connection.close()
-    return SQLiteCheckpointStore(database)
+    return database, SQLiteCheckpointStore(database)
 
 
 def test_pause_handlers_persist_distinct_waiting_states():
     with tempfile.TemporaryDirectory() as temporary_directory:
-        store = make_store(temporary_directory, "wf-1")
-        make_store(temporary_directory, "wf-2")
+        _, store = make_store(temporary_directory, "wf-1")
+        database, _ = make_store(temporary_directory, "wf-2")
         controller = MockController()
         engine = RecoveryEngine(store, controller)
         checkpoint = {"step_id": "step-1", "checkpoint_version": 1}
 
         asyncio.run(engine.handle_network_unavailable("wf-1", checkpoint))
-        asyncio.run(engine.handle_auth_required("wf-2", checkpoint))
+        engine2 = RecoveryEngine(SQLiteCheckpointStore(database), controller)
+        asyncio.run(engine2.handle_auth_required("wf-2", checkpoint))
 
         assert asyncio.run(store.load("wf-1"))["state"] == "WAITING_FOR_NETWORK"
-        assert asyncio.run(store.load("wf-2"))["state"] == "WAITING_FOR_AUTH"
+        assert asyncio.run(SQLiteCheckpointStore(database).load("wf-2"))["state"] == "WAITING_FOR_AUTH"
         assert [event[0] for event in controller.events] == ["pause", "pause"]
 
 
-def test_resume_skips_confirmed_side_effect():
+def test_resume_confirmed_action_requests_skip_from_generic_controller():
     with tempfile.TemporaryDirectory() as temporary_directory:
-        store = make_store(temporary_directory, "wf-1")
+        _, store = make_store(temporary_directory, "wf-1")
         controller = MockController()
         verifier = MockVerifier("CONFIRMED")
         engine = RecoveryEngine(store, controller, verifier)
-        asyncio.run(store.save("wf-1", {"action_idempotency_key": "action-1", "step_id": "step-1"}))
+        asyncio.run(store.save("wf-1", {
+            "action_idempotency_key": "action-1",
+            "operation_id": "operation-1",
+            "step_id": "step-1",
+        }))
 
         result = asyncio.run(engine.resume_from_checkpoint("wf-1"))
 
         assert result.skipped_action is True
         assert controller.events[0][2] is True
-        assert verifier.keys == ["action-1"]
+        assert verifier.keys == [("action-1", "operation-1")]
 
 
 def test_resume_pauses_when_action_state_is_ambiguous():
     with tempfile.TemporaryDirectory() as temporary_directory:
-        store = make_store(temporary_directory, "wf-1")
+        _, store = make_store(temporary_directory, "wf-1")
         controller = MockController()
         engine = RecoveryEngine(store, controller, MockVerifier("IN_PROGRESS"))
-        asyncio.run(store.save("wf-1", {"action_idempotency_key": "action-1"}))
+        asyncio.run(store.save("wf-1", {"action_idempotency_key": "action-1", "operation_id": "op-1"}))
 
         result = asyncio.run(engine.resume_from_checkpoint("wf-1"))
 
