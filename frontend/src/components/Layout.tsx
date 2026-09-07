@@ -35,7 +35,7 @@ export function Layout() {
           </div>
         </div>
 
-        <nav className="nav" aria-label="Main navigation">
+        <nav className="nav" aria-label={t('main_navigation')}>
           {navItems.map((item) => (
             <NavLink
               key={item.to}
