@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from .models import ExecutionStatus, WorkflowState
 from .state_machine import assert_workflow_transition
+
+
+_VERIFICATION_STATE = "VERIFYING"
+_VERIFICATION_LEASE_SECONDS = 60
 
 
 def _pause_target(reason: str) -> WorkflowState:
@@ -110,13 +115,12 @@ def install_workflow_hardening() -> None:
         }:
             raise RuntimeError(f"Workflow is not executable from state: {current.value}")
 
-        # Resolve expired claims before the engine opens its execution transaction.
-        # This prevents a provider/network verification call from holding BEGIN IMMEDIATE.
         connection = self.database.get_connection()
         try:
             row = connection.execute(
                 """
-                SELECT s.idempotency_key, s.operation_id, s.provider_id, l.status, l.expires_at
+                SELECT s.idempotency_key, s.operation_id, s.provider_id,
+                       l.status, l.expires_at, l.claim_owner
                 FROM steps s
                 JOIN tasks t ON t.task_id=s.task_id
                 LEFT JOIN idempotency_ledger l ON l.idempotency_key=s.idempotency_key
@@ -127,9 +131,49 @@ def install_workflow_hardening() -> None:
         finally:
             connection.close()
 
-        if row is not None and row["status"] == ExecutionStatus.IN_PROGRESS.value and _expired(
-            row["expires_at"], self._now()
-        ):
+        if row is not None and row["status"] == _VERIFICATION_STATE:
+            if not _expired(row["expires_at"], self._now()):
+                raise RuntimeError("External action verification is already in progress")
+
+        verification_owner: str | None = None
+        if row is not None and row["status"] in {
+            ExecutionStatus.IN_PROGRESS.value,
+            _VERIFICATION_STATE,
+        } and _expired(row["expires_at"], self._now()):
+            verification_owner = str(uuid.uuid4())
+            verification_expires = (self._now() + timedelta(seconds=_VERIFICATION_LEASE_SECONDS)).isoformat()
+            connection = self.database.get_connection()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                cursor = connection.execute(
+                    """
+                    UPDATE idempotency_ledger
+                    SET status=?, claim_owner=?, expires_at=?
+                    WHERE idempotency_key=? AND workflow_id=? AND step_id=?
+                      AND status IN (?, ?)
+                      AND expires_at<=?
+                    """,
+                    (
+                        _VERIFICATION_STATE,
+                        verification_owner,
+                        verification_expires,
+                        row["idempotency_key"],
+                        workflow_id,
+                        step_id,
+                        ExecutionStatus.IN_PROGRESS.value,
+                        _VERIFICATION_STATE,
+                        self._now().isoformat(),
+                    ),
+                )
+                connection.commit()
+                if cursor.rowcount != 1:
+                    raise RuntimeError("Expired workflow claim changed while verification ownership was acquired")
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+
             adapter = self.adapters.get(row["provider_id"])
             if adapter is None:
                 raise LookupError(f"No adapter registered for provider: {row['provider_id']}")
@@ -156,18 +200,20 @@ def install_workflow_hardening() -> None:
                     """
                     UPDATE idempotency_ledger
                     SET status=?, expires_at=NULL, claim_owner=NULL
-                    WHERE idempotency_key=? AND workflow_id=? AND step_id=? AND status=?
+                    WHERE idempotency_key=? AND workflow_id=? AND step_id=?
+                      AND status=? AND claim_owner=?
                     """,
                     (
                         ExecutionStatus.FAILED.value,
                         row["idempotency_key"],
                         workflow_id,
                         step_id,
-                        ExecutionStatus.IN_PROGRESS.value,
+                        _VERIFICATION_STATE,
+                        verification_owner,
                     ),
                 )
                 if cursor.rowcount != 1:
-                    raise RuntimeError("Expired workflow claim changed while being verified")
+                    raise RuntimeError("Workflow verification ownership changed before reclaim")
                 connection.commit()
             except Exception:
                 connection.rollback()
