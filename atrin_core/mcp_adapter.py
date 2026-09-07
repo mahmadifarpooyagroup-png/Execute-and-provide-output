@@ -10,7 +10,7 @@ from .protocol_models import MCPConfig, ProtocolConnection, ProtocolType
 
 
 class MCPAdapter(IProviderAdapter):
-    """MCP Streamable HTTP adapter for the stateless 2026-07-28 revision."""
+    """MCP Streamable HTTP adapter for the stateless 2026-07-28 model."""
 
     PROTOCOL_VERSION = "2026-07-28"
 
@@ -53,27 +53,9 @@ class MCPAdapter(IProviderAdapter):
         return headers
 
     async def connect(self) -> ProtocolConnection:
-        request_id = next(self._request_ids)
-        payload = {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "method": "server/discover",
-            "params": {
-                "_meta": {
-                    "io.modelcontextprotocol/clientInfo": {
-                        "name": "atrin-core",
-                        "version": "0.1.0",
-                    }
-                }
-            },
-        }
-        response = await self._client.post(
-            self._url(), json=payload, headers=self._headers("server/discover")
-        )
-        response.raise_for_status()
-        data = response.json()
-        if isinstance(data, dict) and "error" in data:
-            raise RuntimeError(f"MCP server/discover failed: {data['error']}")
+        # The 2026-07-28 stateless HTTP model does not require a session
+        # handshake. Connection here is a local readiness state; the first
+        # real MCP request performs the actual server availability check.
         self._connected = True
         self.protocol_state.state = "CONNECTED"
         self.protocol_state.health = "HEALTHY"
@@ -105,8 +87,6 @@ class MCPAdapter(IProviderAdapter):
         return normalized
 
     async def execute(self, action: str, idempotency_key: str, *, fencing_token: int | None = None) -> Dict[str, Any]:
-        if fencing_token is None and self.config.auth_token:
-            pass
         return await self.call_tool(action, {}, idempotency_key=idempotency_key)
 
     async def verify_action(self, idempotency_key: str) -> str:
@@ -124,9 +104,7 @@ class MCPAdapter(IProviderAdapter):
     async def _rpc(self, method: str, *, params: Dict[str, Any], name: str | None = None) -> Dict[str, Any]:
         request_id = next(self._request_ids)
         payload = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
-        response = await self._client.post(
-            self._url(), json=payload, headers=self._headers(method, name)
-        )
+        response = await self._client.post(self._url(), json=payload, headers=self._headers(method, name))
         response.raise_for_status()
         data = response.json()
         if not isinstance(data, dict):
