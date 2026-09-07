@@ -40,33 +40,18 @@ def test_complete_provider_lifecycle_workflow_recovery_and_audit(tmp_path):
             task_id="task-collect-data",
             description="Collect provider data",
             steps=[
-                Step(
-                    step_id="step-fetch-users",
-                    action="fetch_users",
-                    provider_id=provider_id,
-                    idempotency_key="fetch-users-key",
-                    provider_profile_id=profile_id,
-                ),
-                Step(
-                    step_id="step-sync-data",
-                    action="sync_data",
-                    provider_id=provider_id,
-                    idempotency_key="sync-data-key",
-                    provider_profile_id=profile_id,
-                ),
+                Step(step_id="step-fetch-users", action="fetch_users", provider_id=provider_id,
+                     idempotency_key="fetch-users-key", provider_profile_id=profile_id),
+                Step(step_id="step-sync-data", action="sync_data", provider_id=provider_id,
+                     idempotency_key="sync-data-key", provider_profile_id=profile_id),
             ],
         ),
         Task(
             task_id="task-validate-output",
             description="Validate output",
             steps=[
-                Step(
-                    step_id="step-verify-results",
-                    action="verify_results",
-                    provider_id=provider_id,
-                    idempotency_key="verify-results-key",
-                    provider_profile_id=profile_id,
-                )
+                Step(step_id="step-verify-results", action="verify_results", provider_id=provider_id,
+                     idempotency_key="verify-results-key", provider_profile_id=profile_id)
             ],
         ),
     ]
@@ -74,40 +59,19 @@ def test_complete_provider_lifecycle_workflow_recovery_and_audit(tmp_path):
     workflow_id = engine.create_workflow("Complete provider lifecycle and workflow execution", workflow)
     token = manager.acquire_lock(profile_id, workflow_id)
     connection = database.get_connection()
-    connection.execute(
-        "UPDATE steps SET fencing_token=? WHERE provider_profile_id=?",
-        (token, profile_id),
-    )
+    connection.execute("UPDATE steps SET fencing_token=? WHERE provider_profile_id=?", (token, profile_id))
     connection.commit()
     connection.close()
 
-    assert engine.get_workflow_state(workflow_id) == WorkflowState.IDLE
-
-    for step_id in ["step-fetch-users", "step-sync-data", "step-verify-results"]:
-        asyncio.run(engine.execute_step(workflow_id, step_id))
-
-    assert [call[:2] for call in adapter.calls] == [
-        ("fetch_users", "fetch-users-key"),
-        ("sync_data", "sync-data-key"),
-        ("verify_results", "verify-results-key"),
-    ]
-    assert all(call[2] == token for call in adapter.calls)
-    assert engine.get_workflow_state(workflow_id) == WorkflowState.COMPLETED
-
-    connection = database.get_connection()
-    workflow_audit = connection.execute(
-        "SELECT event_type FROM audit_log WHERE workflow_id=? ORDER BY seq", (workflow_id,)
-    ).fetchall()
-    events = [row[0] for row in workflow_audit]
-    assert "WORKFLOW_CREATED" in events
-    assert events.count("ACTION_CLAIMED") >= 3
-    assert events.count("ACTION_CONFIRMED") >= 3
+    asyncio.run(engine.execute_step(workflow_id, "step-fetch-users"))
+    assert engine.get_workflow_state(workflow_id) == WorkflowState.OBSERVING
 
     adapter.fail_next = True
     with pytest.raises(RuntimeError, match="ambiguous"):
         asyncio.run(engine.execute_step(workflow_id, "step-sync-data"))
     assert engine.get_workflow_state(workflow_id) == WorkflowState.WAITING_FOR_PROVIDER
 
+    connection = database.get_connection()
     ambiguous = connection.execute(
         "SELECT status FROM idempotency_ledger WHERE idempotency_key='sync-data-key'"
     ).fetchone()[0]
@@ -117,12 +81,28 @@ def test_complete_provider_lifecycle_workflow_recovery_and_audit(tmp_path):
     recovery = asyncio.run(engine.recovery_engine.resume_from_checkpoint(workflow_id))
     assert recovery.resumed is True
     assert recovery.skipped_action is True
+    assert engine.get_workflow_state(workflow_id) == WorkflowState.OBSERVING
+
+    asyncio.run(engine.execute_step(workflow_id, "step-verify-results"))
     assert engine.get_workflow_state(workflow_id) == WorkflowState.COMPLETED
-    assert sum(1 for call in adapter.calls if call[1] == "sync-data-key") == 2
+
+    calls_for_sync = [call for call in adapter.calls if call[1] == "sync-data-key"]
+    # The failed dispatch is attempted once; verified recovery must not replay it.
+    assert len(calls_for_sync) == 1
+    assert all(call[2] == token for call in adapter.calls)
+
+    workflow_audit = connection.execute(
+        "SELECT event_type FROM audit_log WHERE workflow_id=? ORDER BY seq", (workflow_id,)
+    ).fetchall()
+    events = [row[0] for row in workflow_audit]
+    assert "WORKFLOW_CREATED" in events
+    assert events.count("ACTION_CLAIMED") >= 3
+    assert events.count("ACTION_CONFIRMED") >= 2
+    assert "ACTION_AMBIGUOUS" in events
+    assert "ACTION_CONFIRMED_BY_VERIFIER" in events
 
     connection.execute(
-        "DELETE FROM steps WHERE task_id IN (SELECT task_id FROM tasks WHERE workflow_id=?)",
-        (workflow_id,),
+        "DELETE FROM steps WHERE task_id IN (SELECT task_id FROM tasks WHERE workflow_id=?)", (workflow_id,)
     )
     connection.execute("DELETE FROM tasks WHERE workflow_id=?", (workflow_id,))
     connection.execute("DELETE FROM workflow_checkpoints WHERE workflow_id=?", (workflow_id,))
