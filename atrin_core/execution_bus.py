@@ -3,6 +3,7 @@ import os
 import shutil
 import sys
 import time
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import psutil
@@ -13,7 +14,12 @@ from .execution_models import ExecutionAction, ExecutionResult, ExecutionTarget,
 class ExecutionBus:
     """Vendor-neutral secure process execution bus."""
 
-    def __init__(self, *, allowed_env_keys: Optional[list[str]] = None):
+    def __init__(
+        self,
+        *,
+        allowed_env_keys: Optional[list[str]] = None,
+        allowed_working_dirs: Optional[list[str]] = None,
+    ):
         self.allowed_env_keys = allowed_env_keys or [
             "PATH",
             "HOME",
@@ -23,9 +29,9 @@ class ExecutionBus:
             "SYSTEMROOT",
             "COMSPEC",
             "PATHEXT",
-            "PYTHONPATH",
             "TERM",
         ]
+        self.allowed_working_dirs = [Path(value).expanduser().resolve() for value in (allowed_working_dirs or [])]
 
     async def execute(
         self,
@@ -47,8 +53,22 @@ class ExecutionBus:
                 error_message="Permission denied by policy.",
             )
 
-        command = self._build_command(action)
-        env = self._build_environment()
+        try:
+            self._validate_working_dir(action.working_dir)
+            command = self._build_command(action)
+            env = self._build_environment()
+        except (OSError, ValueError) as exc:
+            duration_ms = (time.perf_counter() - start) * 1000.0
+            return ExecutionResult(
+                action_id=action.action_id,
+                status="permission_denied",
+                stdout="",
+                stderr=str(exc),
+                exit_code=126,
+                duration_ms=duration_ms,
+                evidence="Execution admission rejected by policy.",
+                error_message=str(exc),
+            )
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -73,8 +93,7 @@ class ExecutionBus:
 
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=action.timeout_seconds,
+                proc.communicate(), timeout=action.timeout_seconds
             )
         except asyncio.TimeoutError:
             await self._terminate_tree(proc)
@@ -83,6 +102,8 @@ class ExecutionBus:
             return ExecutionResult(
                 action_id=action.action_id,
                 status="timed_out",
+                stdout="",
+                stderr="",
                 exit_code=124,
                 duration_ms=duration_ms,
                 evidence=self._build_evidence(action, "", message, 124),
@@ -116,6 +137,17 @@ class ExecutionBus:
             allowed = permission_check_callback()
         return bool(allowed)
 
+    def _validate_working_dir(self, working_dir: Optional[str]) -> None:
+        if not working_dir:
+            return
+        path = Path(working_dir).expanduser().resolve()
+        if not path.is_dir():
+            raise ValueError(f"Working directory does not exist: {working_dir}")
+        if self.allowed_working_dirs and not any(
+            path == root or root in path.parents for root in self.allowed_working_dirs
+        ):
+            raise PermissionError("Working directory is outside the execution policy roots")
+
     def _build_command(self, action: ExecutionAction) -> list[str]:
         target = action.execution_target
         args = list(action.arguments)
@@ -140,7 +172,6 @@ class ExecutionBus:
             return [sys.executable, *args]
         if target == ExecutionTarget.PROCESS:
             return [sys.executable, *args]
-
         return [sys.executable, *args]
 
     def _build_environment(self) -> dict[str, str]:
@@ -149,15 +180,19 @@ class ExecutionBus:
             value = os.environ.get(key)
             if value is not None:
                 env[key] = value
-
         if os.name == "nt":
             env.setdefault("PATH", os.environ.get("PATH", ""))
         else:
             env.setdefault("PATH", os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"))
-
         return env
 
-    def _build_evidence(self, action: ExecutionAction, stdout: str, stderr: str, exit_code: Optional[int]) -> str:
+    def _build_evidence(
+        self,
+        action: ExecutionAction,
+        stdout: str,
+        stderr: str,
+        exit_code: Optional[int],
+    ) -> str:
         if action.execution_target == ExecutionTarget.FILESYSTEM:
             if action.arguments:
                 target_path = action.arguments[0]
@@ -187,14 +222,13 @@ class ExecutionBus:
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
             _, alive = psutil.wait_procs([parent, *children], timeout=3)
-            for p in alive:
+            for process in alive:
                 try:
-                    p.kill()
+                    process.kill()
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
-
         try:
             proc.kill()
         except Exception:
