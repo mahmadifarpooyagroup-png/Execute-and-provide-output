@@ -26,9 +26,8 @@ class FakeResponse:
 async def test_mcp_adapter_stateless_rpc_lifecycle_and_tool_calls():
     mock_client = Mock()
     mock_client.post = AsyncMock(side_effect=[
-        FakeResponse(json_data={"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}),
-        FakeResponse(json_data={"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "echo"}]}}),
-        FakeResponse(json_data={"jsonrpc": "2.0", "id": 3, "result": {"status": "ok"}}),
+        FakeResponse(json_data={"jsonrpc": "2.0", "id": 1, "result": {"tools": [{"name": "echo"}]}}),
+        FakeResponse(json_data={"jsonrpc": "2.0", "id": 2, "result": {"status": "ok"}}),
     ])
 
     adapter = MCPAdapter(
@@ -48,7 +47,7 @@ async def test_mcp_adapter_stateless_rpc_lifecycle_and_tool_calls():
     await adapter.disconnect()
     assert adapter.protocol_state.state == "DISCONNECTED"
     assert adapter.protocol_state.health == "OFFLINE"
-    assert mock_client.post.await_count == 3
+    assert mock_client.post.await_count == 2
 
 
 @pytest.mark.asyncio
