@@ -7,7 +7,6 @@ import uvicorn
 from atrin_core.interfaces import IProviderAdapter
 from atrin_core.provider_registry import ProviderAdapterRegistry
 from atrin_core.runtime import create_app
-from atrin_core.security import LocalSecurityManager
 
 
 class E2EFakeAdapter(IProviderAdapter):
