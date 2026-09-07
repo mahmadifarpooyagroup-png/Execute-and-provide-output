@@ -16,6 +16,11 @@ impl RuntimeProcess {
     }
 }
 
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).map(|dir| dir.join(name)).find(|candidate| candidate.is_file())
+}
+
 fn find_python(resource_dir: &Path) -> Option<PathBuf> {
     if let Ok(value) = std::env::var("ATRIN_PYTHON") {
         let candidate = PathBuf::from(value);
@@ -34,11 +39,11 @@ fn find_python(resource_dir: &Path) -> Option<PathBuf> {
     }
 
     for candidate in if cfg!(target_os = "windows") {
-        vec!["python.exe", "python", "py"]
+        vec!["python.exe", "python", "py.exe", "py"]
     } else {
         vec!["python3", "python"]
     } {
-        if let Ok(path) = which::which(candidate) {
+        if let Some(path) = find_on_path(candidate) {
             return Some(path);
         }
     }
