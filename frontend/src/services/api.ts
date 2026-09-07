@@ -20,6 +20,48 @@ export interface RuntimeProvider {
   updated_at: string
 }
 
+export interface RuntimeProviderCatalogItem {
+  id: string
+  name: string
+  description?: string | null
+  connection_kind: string
+  transport?: string | null
+  adapter_id: string
+  protocol?: string | null
+  capabilities: string[]
+  enabled: boolean
+  health_status: string
+  version?: string | null
+}
+
+export interface RuntimeWorkflowStep {
+  step_id: string
+  task_id: string
+  action: string
+  provider_id: string
+  idempotency_key: string
+  operation_id: string | null
+  status: string
+  result: string | null
+  evidence: string | null
+  order_index: number
+  provider_profile_id: string | null
+  fencing_token: number | null
+  side_effecting: number
+}
+
+export interface RuntimeWorkflowDetail {
+  workflow: RuntimeWorkflow
+  tasks: Array<{
+    task_id: string
+    description: string
+    status: string
+    order_index: number
+  }>
+  steps: RuntimeWorkflowStep[]
+  checkpoint: Record<string, unknown> | null
+}
+
 export interface RuntimeRecoveryItem {
   workflow_id: string
   goal: string
@@ -92,6 +134,28 @@ export async function getStatus(): Promise<{ status: string; message: string; ve
   return request('/api/v1/status')
 }
 
+export async function getProviderCatalog(): Promise<RuntimeProviderCatalogItem[]> {
+  const response = await request<{ items: RuntimeProviderCatalogItem[] }>('/api/v1/provider-catalog')
+  return response.items
+}
+
+export async function createProviderProfile(input: {
+  profile_id: string
+  provider_id: string
+  account_id: string
+  name: string
+}): Promise<RuntimeProvider> {
+  await request(`/api/v1/providers`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': `provider-profile:${input.profile_id}` },
+    body: JSON.stringify(input),
+  })
+  const providers = await getProviders()
+  const created = providers.find((provider) => provider.profile_id === input.profile_id)
+  if (!created) throw new Error('Provider profile was created but could not be loaded')
+  return created
+}
+
 export async function getProviders(limit = 100, offset = 0): Promise<RuntimeProvider[]> {
   const response = await request<{ items: RuntimeProvider[] }>(`/api/v1/providers?limit=${limit}&offset=${offset}`)
   return response.items
@@ -100,6 +164,40 @@ export async function getProviders(limit = 100, offset = 0): Promise<RuntimeProv
 export async function getWorkflows(limit = 100, offset = 0): Promise<RuntimeWorkflow[]> {
   const response = await request<{ items: RuntimeWorkflow[] }>(`/api/v1/workflows?limit=${limit}&offset=${offset}`)
   return response.items
+}
+
+export async function getWorkflowDetail(workflowId: string): Promise<RuntimeWorkflowDetail> {
+  return request(`/api/v1/workflows/${encodeURIComponent(workflowId)}`)
+}
+
+export async function createWorkflow(input: {
+  goal: string
+  taskId: string
+  description: string
+  stepId: string
+  action: string
+  providerId: string
+  providerProfileId?: string | null
+  sideEffecting?: boolean
+}, idempotencyKey: string): Promise<{ workflow_id: string; state: string }> {
+  return request('/api/v1/workflows', {
+    method: 'POST',
+    headers: { 'Idempotency-Key': idempotencyKey },
+    body: JSON.stringify({
+      goal: input.goal,
+      plan: [{
+        task_id: input.taskId,
+        description: input.description,
+        steps: [{
+          step_id: input.stepId,
+          action: input.action,
+          provider_id: input.providerId,
+          provider_profile_id: input.providerProfileId ?? null,
+          side_effecting: input.sideEffecting ?? false,
+        }],
+      }],
+    }),
+  })
 }
 
 export async function getRecoveryQueue(limit = 100, offset = 0): Promise<RuntimeRecoveryItem[]> {
