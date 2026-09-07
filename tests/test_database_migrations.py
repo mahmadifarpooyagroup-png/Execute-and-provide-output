@@ -14,9 +14,7 @@ def test_legacy_database_is_upgraded_in_place(tmp_path):
             step_id TEXT NOT NULL,
             provider_id TEXT NOT NULL,
             status TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            confirmed_at TIMESTAMP,
-            expires_at TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE workflows (
             workflow_id TEXT PRIMARY KEY,
@@ -50,6 +48,13 @@ def test_legacy_database_is_upgraded_in_place(tmp_path):
             payload TEXT NOT NULL,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE plugins_registry (
+            plugin_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            version TEXT NOT NULL,
+            is_active BOOLEAN NOT NULL DEFAULT 1,
+            installed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
         """
     )
     conn.commit()
@@ -62,11 +67,13 @@ def test_legacy_database_is_upgraded_in_place(tmp_path):
         step_columns = {row["name"] for row in connection.execute("PRAGMA table_info(steps)")}
         workflow_columns = {row["name"] for row in connection.execute("PRAGMA table_info(workflows)")}
         checkpoint_columns = {row["name"] for row in connection.execute("PRAGMA table_info(workflow_checkpoints)")}
-        assert {"claim_owner", "attempt", "operation_id"}.issubset(ledger_columns)
+        plugin_columns = {row["name"] for row in connection.execute("PRAGMA table_info(plugins_registry)")}
+        assert {"claim_owner", "attempt", "operation_id", "confirmed_at", "expires_at"}.issubset(ledger_columns)
         assert {"provider_profile_id", "fencing_token", "operation_id", "side_effecting"}.issubset(step_columns)
         assert "client_request_id" in workflow_columns
         assert "revision" in checkpoint_columns
-        assert connection.execute("SELECT value FROM schema_metadata WHERE key='schema_version'").fetchone()[0] == "5"
+        assert {"path", "sha256", "updated_at"}.issubset(plugin_columns)
+        assert connection.execute("SELECT value FROM schema_metadata WHERE key='schema_version'").fetchone()[0] == "6"
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     finally:
         connection.close()
