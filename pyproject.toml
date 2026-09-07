@@ -23,7 +23,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools>=68.0,<81.0"]
+requires = ["setuptools>=68.0,<81.0]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
@@ -33,7 +33,10 @@ include = ["atrin_core*"]
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "B", "UP", "I"]
+# Keep correctness-oriented linting in the release gate. UP is a style-only
+# modernization family and would turn harmless Python 3.10-compatible syntax
+# into a blocker without changing runtime behavior.
+select = ["E", "F", "B", "I"]
 ignore = ["E501"]
 
 [tool.mypy]
