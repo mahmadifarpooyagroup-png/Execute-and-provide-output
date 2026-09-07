@@ -205,7 +205,15 @@ class CloudSyncManager:
         checkpoint = remote.get("checkpoint", remote)
         if not isinstance(checkpoint, dict):
             raise ValueError("Remote checkpoint payload is invalid")
-        remote_revision = int(remote.get("revision", checkpoint.get("revision", 0)))
+        raw_remote_revision = remote.get("revision")
+        if raw_remote_revision is None:
+            raw_remote_revision = checkpoint.get("revision", 0)
+        if not isinstance(raw_remote_revision, (int, float, str)):
+            raise ValueError("Remote checkpoint revision is invalid")
+        try:
+            remote_revision = int(raw_remote_revision)
+        except (TypeError, ValueError) as error:
+            raise ValueError("Remote checkpoint revision is invalid") from error
         remote_hash = str(remote.get("content_hash") or self._content_hash(checkpoint))
         local = await self._call(self.recovery_engine.checkpoint_store.load, workflow_id)
         local_revision = int(local.get("revision", 0)) if isinstance(local, dict) else None
