@@ -34,6 +34,7 @@ def test_complete_provider_lifecycle_workflow_recovery_and_audit(tmp_path):
 
     adapter = MockWorkflowAdapter()
     engine = WorkflowEngine(database, {provider_id: adapter}, session_manager=manager)
+    engine.recovery_engine.external_state_verifier = adapter
 
     workflow = [
         Task(
@@ -87,7 +88,6 @@ def test_complete_provider_lifecycle_workflow_recovery_and_audit(tmp_path):
     assert engine.get_workflow_state(workflow_id) == WorkflowState.COMPLETED
 
     calls_for_sync = [call for call in adapter.calls if call[1] == "sync-data-key"]
-    # The failed dispatch is attempted once; verified recovery must not replay it.
     assert len(calls_for_sync) == 1
     assert all(call[2] == token for call in adapter.calls)
 
