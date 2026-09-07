@@ -91,9 +91,19 @@ def test_provider_and_workflow_journey(browser_servers):
         page.set_default_navigation_timeout(30000)
         seed_session(page)
         page.goto(FRONTEND_URL, wait_until="domcontentloaded")
+        page.evaluate(
+            "window.sessionStorage.setItem('atrin.runtime.token', %r);"
+            "window.localStorage.setItem('i18nextLng', 'en');" % E2E_TOKEN
+        )
+        page.reload(wait_until="domcontentloaded")
 
         page.get_by_role("link", name="Providers").click()
-        page.get_by_label("Profile ID").fill("ui-e2e-profile")
+        try:
+            page.get_by_label("Profile ID").fill("ui-e2e-profile")
+        except Exception:
+            print("Providers URL:", page.url)
+            print("Providers page text:\n", page.locator("body").inner_text())
+            raise
         page.get_by_label("Account ID").fill("ui-e2e-account")
         page.get_by_label("Display name").fill("UI E2E Profile")
         page.get_by_role("button", name="Add provider").click()
