@@ -190,7 +190,13 @@ export async function createProviderProfile(input: {
       try {
         const providers = await getProviders()
         const existing = providers.find((provider) => provider.profile_id === input.profile_id)
-        if (existing && existing.provider_id === input.provider_id && existing.account_id === input.account_id && existing.name === input.name) {
+        if (
+          existing &&
+          existing.profile_id === input.profile_id &&
+          existing.provider_id === input.provider_id &&
+          existing.account_id === input.account_id &&
+          existing.name === input.name
+        ) {
           return existing
         }
       } catch {
