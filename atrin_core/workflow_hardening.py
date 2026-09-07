@@ -42,17 +42,20 @@ def _expired(value: Any, now: datetime) -> bool:
 def install_workflow_hardening() -> None:
     from .workflow_engine import WorkflowEngine
 
-    if getattr(WorkflowEngine, "_atrin_hardening_installed", False):
+    engine_type: Any = WorkflowEngine
+    if getattr(engine_type, "_atrin_hardening_installed", False):
         return
 
-    original_assert = WorkflowEngine._assert_step_runnable
-    original_pause = WorkflowEngine.pause_workflow
-    original_resume = WorkflowEngine.resume_workflow
-    original_cancel = WorkflowEngine.cancel_workflow
-    original_execute = WorkflowEngine.execute_step
+    original_assert = engine_type._assert_step_runnable
+    original_pause = engine_type.pause_workflow
+    original_resume = engine_type.resume_workflow
+    original_cancel = engine_type.cancel_workflow
+    original_execute = engine_type.execute_step
 
     def hardened_assert(self: Any, connection: Any, workflow_id: str, step: Any) -> None:
-        workflow = connection.execute("SELECT state FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
+        workflow = connection.execute(
+            "SELECT state FROM workflows WHERE workflow_id=?", (workflow_id,)
+        ).fetchone()
         if workflow is not None and workflow["state"] in {
             WorkflowState.WAITING_FOR_AUTH.value,
             WorkflowState.WAITING_FOR_NETWORK.value,
@@ -73,8 +76,12 @@ def install_workflow_hardening() -> None:
             assert_workflow_transition(current, target)
         await original_pause(self, workflow_id, reason)
 
-    async def hardened_resume(self: Any, workflow_id: str, checkpoint: Mapping[str, Any] | None = None,
-                              skip_action: bool = False) -> Any:
+    async def hardened_resume(
+        self: Any,
+        workflow_id: str,
+        checkpoint: Mapping[str, Any] | None = None,
+        skip_action: bool = False,
+    ) -> Any:
         current = _state(self, workflow_id)
         if current != WorkflowState.RECOVERING:
             assert_workflow_transition(current, WorkflowState.RECOVERING)
@@ -120,13 +127,19 @@ def install_workflow_hardening() -> None:
         finally:
             connection.close()
 
-        if row is not None and row["status"] == ExecutionStatus.IN_PROGRESS.value and _expired(row["expires_at"], self._now()):
+        if row is not None and row["status"] == ExecutionStatus.IN_PROGRESS.value and _expired(
+            row["expires_at"], self._now()
+        ):
             adapter = self.adapters.get(row["provider_id"])
             if adapter is None:
                 raise LookupError(f"No adapter registered for provider: {row['provider_id']}")
-            verified = await self._verify_existing_action(adapter, row["idempotency_key"], row["operation_id"])
+            verified = await self._verify_existing_action(
+                adapter, row["idempotency_key"], row["operation_id"]
+            )
             if verified == "CONFIRMED":
-                return await self._finalize_verified_action(workflow_id, step_id, row["idempotency_key"])
+                return await self._finalize_verified_action(
+                    workflow_id, step_id, row["idempotency_key"]
+                )
             if verified not in {"NOT_STARTED", "FAILED"}:
                 self._mark_ambiguous(
                     workflow_id,
@@ -135,12 +148,23 @@ def install_workflow_hardening() -> None:
                     f"Verifier returned {verified} for expired claim",
                 )
                 raise RuntimeError("External action state is ambiguous; workflow paused for recovery")
+
             connection = self.database.get_connection()
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 cursor = connection.execute(
-                    "UPDATE idempotency_ledger SET status=?, expires_at=NULL, claim_owner=NULL WHERE idempotency_key=? AND workflow_id=? AND step_id=? AND status=?",
-                    (ExecutionStatus.FAILED.value, row["idempotency_key"], workflow_id, step_id, ExecutionStatus.IN_PROGRESS.value),
+                    """
+                    UPDATE idempotency_ledger
+                    SET status=?, expires_at=NULL, claim_owner=NULL
+                    WHERE idempotency_key=? AND workflow_id=? AND step_id=? AND status=?
+                    """,
+                    (
+                        ExecutionStatus.FAILED.value,
+                        row["idempotency_key"],
+                        workflow_id,
+                        step_id,
+                        ExecutionStatus.IN_PROGRESS.value,
+                    ),
                 )
                 if cursor.rowcount != 1:
                     raise RuntimeError("Expired workflow claim changed while being verified")
@@ -153,9 +177,9 @@ def install_workflow_hardening() -> None:
 
         return await original_execute(self, workflow_id, step_id)
 
-    WorkflowEngine._assert_step_runnable = hardened_assert
-    WorkflowEngine.pause_workflow = hardened_pause
-    WorkflowEngine.resume_workflow = hardened_resume
-    WorkflowEngine.cancel_workflow = hardened_cancel
-    WorkflowEngine.execute_step = hardened_execute
-    WorkflowEngine._atrin_hardening_installed = True
+    engine_type._assert_step_runnable = hardened_assert
+    engine_type.pause_workflow = hardened_pause
+    engine_type.resume_workflow = hardened_resume
+    engine_type.cancel_workflow = hardened_cancel
+    engine_type.execute_step = hardened_execute
+    engine_type._atrin_hardening_installed = True
