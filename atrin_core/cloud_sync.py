@@ -130,7 +130,7 @@ class CloudSyncManager:
             endpoint_url=endpoint if isinstance(endpoint, str) else None,
             bucket_name=bucket if isinstance(bucket, str) else None,
             path=path if isinstance(path, str) else None,
-            encryption_key_hash=hashlib.sha256(passphrase.encode()).hexdigest(),
+            encryption_key_hash=hashlib.sha256(self._encryption_key).hexdigest(),
         )
         if provider_type == "local_network":
             local_path = path if isinstance(path, str) else self._file_url_path(endpoint if isinstance(endpoint, str) else None)
@@ -143,7 +143,10 @@ class CloudSyncManager:
                 if not isinstance(bucket, str):
                     raise ValueError("bucket_name is required for s3 storage")
                 base_url = f"{base_url}/{quote(bucket, safe='')}"
-            self.storage_provider = HTTPStorageProvider(base_url, dict(config.get("headers", {})))
+            headers = config.get("headers", {})
+            if not isinstance(headers, dict):
+                raise ValueError("config.headers must be an object")
+            self.storage_provider = HTTPStorageProvider(base_url, {str(k): str(v) for k, v in headers.items()})
         return self.sync_config
 
     def encrypt_payload(self, data: dict) -> bytes:
@@ -241,6 +244,8 @@ class CloudSyncManager:
                 "remote_revision": remote_revision,
                 "local_hash": local_hash,
                 "remote_hash": remote_hash,
+                "local_timestamp": local.get("updated_at") if isinstance(local, dict) else None,
+                "remote_timestamp": remote.get("synced_at") or checkpoint.get("updated_at"),
                 "warning": "Local and remote checkpoints diverged; review before applying.",
             }
         return checkpoint
