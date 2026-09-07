@@ -5,15 +5,15 @@ import pytest
 
 from atrin_core.database import AtrinDatabase
 from atrin_core.models import Provider
-from atrin_core.provider_registry import OpenAICompatibleAdapter, ProviderAdapterRegistry
+from atrin_core.provider_registry import CompatibleChatAdapter, ProviderAdapterRegistry
 
 
-def test_registry_catalog_and_openai_compatible_config():
+def test_registry_catalog_and_chat_adapter_config():
     registry = ProviderAdapterRegistry()
     provider = registry.register({
         "id": "local-api",
         "name": "Local API",
-        "adapter_id": "openai-compatible",
+        "adapter_id": "chat-completions",
         "endpoint": "http://127.0.0.1:9000/v1",
         "metadata": {
             "api": {
@@ -86,7 +86,18 @@ class _FakeAdapter:
         return False
 
 
-def test_openai_response_extraction():
-    assert OpenAICompatibleAdapter._extract_text({"choices": [{"message": {"content": "hello"}}]}) == "hello"
-    assert OpenAICompatibleAdapter._extract_text({"choices": [{"text": "hello"}]}) == "hello"
-    assert OpenAICompatibleAdapter._extract_text({"output_text": "hello"}) == "hello"
+def test_chat_response_extraction():
+    assert CompatibleChatAdapter._extract_text({"choices": [{"message": {"content": "hello"}}]}) == "hello"
+    assert CompatibleChatAdapter._extract_text({"choices": [{"text": "hello"}]}) == "hello"
+    assert CompatibleChatAdapter._extract_text({"output_text": "hello"}) == "hello"
+
+
+def test_registry_normalizes_string_capabilities():
+    registry = ProviderAdapterRegistry()
+    provider = registry.register({
+        "id": "string-capability",
+        "adapter_id": "api",
+        "metadata": {"capabilities": "chat"},
+    })
+    assert provider.id == "string-capability"
+    assert registry.catalog()[0]["capabilities"] == ["api", "chat", "text"]
