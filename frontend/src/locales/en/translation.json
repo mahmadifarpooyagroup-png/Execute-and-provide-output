@@ -10,6 +10,7 @@
   "welcome_message": "Atrin orchestration",
   "loading": "Loading",
   "error": "Error",
+  "no_data": "No data available",
   "operations": "Operations",
   "system_nominal": "System nominal",
   "total_providers": "Total providers",
