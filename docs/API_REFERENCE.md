@@ -5,6 +5,7 @@
 - [API Status](#api-status)
 - [Base URL](#base-url)
 - [Authentication](#authentication)
+- [Provider Registry](#provider-registry)
 - [Endpoints](#endpoints)
 - [Request and Response Examples](#request-and-response-examples)
 - [Error Codes](#error-codes)
@@ -12,9 +13,9 @@
 
 ## API Status
 
-The shipped FastAPI application exposes authenticated local endpoints for workflow creation/list/detail, step execution, pause/resume/cancel, provider profiles, session acquire/renew/release, recovery listing, and audit listing. The React frontend uses the authenticated runtime API; deterministic mock service paths are no longer part of the active application path.
+The shipped FastAPI application exposes authenticated local endpoints for provider catalog discovery, provider profiles, workflow creation/list/detail, step execution, pause/resume/cancel, session acquire/renew/release, recovery listing, and audit listing. The React frontend uses the same authenticated runtime API; deterministic mock service paths are no longer part of the active application path.
 
-The runtime does not yet auto-register external provider adapters from persisted profiles. A workflow step therefore requires a registered adapter in the `WorkflowEngine` before it can execute.
+The runtime can build provider adapters automatically from the vendor-neutral registry. Provider-specific behavior remains outside the workflow engine.
 
 ## Base URL
 
@@ -37,7 +38,44 @@ curl -H "X-Atrin-Token: $TOKEN" http://127.0.0.1:8765/api/v1/status
 
 Do not place the token in source control, URLs, browser bookmarks, or support logs.
 
-The desktop UI can store the local runtime token in browser storage through the Settings page. Prefer a local development/test runtime and never reuse a production secret in source-controlled configuration.
+The desktop UI stores the token only for the current browser/Tauri session through `sessionStorage`.
+
+## Provider Registry
+
+Providers are configured through `ATRIN_PROVIDERS_JSON` or `ATRIN_PROVIDERS_FILE`. `ATRIN_PROVIDERS_JSON` must contain a JSON array; `ATRIN_PROVIDERS_FILE` points to a UTF-8 JSON file capped at 1 MiB. Secrets should be supplied through environment variables referenced by the provider configuration.
+
+Built-in adapter IDs:
+
+- `web` / `generic-web`: configurable browser interaction strategy.
+- `api` / `openai-compatible`: generic chat-completions-style HTTP adapter.
+- `mcp`: MCP server adapter.
+- `a2a`: A2A JSON-RPC task adapter.
+- `acp`: ACP session adapter.
+
+Example:
+
+```json
+[
+  {
+    "id": "my-api",
+    "name": "My API",
+    "adapter_id": "openai-compatible",
+    "connection_kind": "API",
+    "endpoint": "https://example.invalid/v1",
+    "metadata": {
+      "api": {
+        "model": "my-model",
+        "api_key_env": "MY_API_KEY"
+      },
+      "capabilities": ["chat"]
+    }
+  }
+]
+```
+
+Web configuration lives under `metadata.web`, for example `start_url`, `composer_selector`, `send_selector`, `response_selector`, `login_selector`, `challenge_selector`, `completion_selector`, `verification_selector`, and optional `profile_path` for a persistent browser profile.
+
+Use `GET /api/v1/provider-catalog` to inspect the configured provider/adapter catalog before creating profiles.
 
 ## Endpoints
 
@@ -50,7 +88,7 @@ No authentication required. Returns service liveness.
 Response `200`:
 
 ```json
-{"status":"healthy","service":"atrin-control-plane","version":"0.2.0"}
+{"status":"healthy","service":"atrin-control-plane","version":"0.3.0"}
 ```
 
 ### Runtime status
@@ -58,6 +96,12 @@ Response `200`:
 `GET /api/v1/status`
 
 Requires `X-Atrin-Token`. Returns authenticated local runtime status.
+
+### Provider catalog
+
+`GET /api/v1/provider-catalog`
+
+Requires `X-Atrin-Token`. Returns the configured provider adapters and capabilities.
 
 ### Workflow management
 
@@ -67,7 +111,7 @@ Creates a durable workflow from a goal and task/step plan.
 
 `GET /api/v1/workflows`
 
-Lists workflows. Optional query parameter: `state`.
+Lists workflows. Optional query parameter: `state`; pagination uses `limit` and `offset`.
 
 `GET /api/v1/workflows/{workflow_id}`
 
@@ -75,7 +119,7 @@ Returns workflow, tasks, steps, and checkpoint data.
 
 `POST /api/v1/workflows/{workflow_id}/run`
 
-Executes one step by `step_id` through its registered provider adapter.
+Executes one step by `step_id` through its configured provider adapter.
 
 `POST /api/v1/workflows/{workflow_id}/pause`
 
@@ -87,7 +131,7 @@ Resumes recoverable workflow execution.
 
 `POST /api/v1/workflows/{workflow_id}/cancel`
 
-Cancels a workflow.
+Cancels a workflow. If an external provider cannot confirm cancellation, the workflow remains in provider recovery rather than being falsely marked cancelled.
 
 ### Provider management
 
@@ -97,7 +141,7 @@ Lists persisted provider profiles.
 
 `POST /api/v1/providers`
 
-Creates a provider profile.
+Creates a provider profile for a configured provider.
 
 ### Session management
 
@@ -107,7 +151,7 @@ Lists session/lease records.
 
 `POST /api/v1/sessions/{profile_id}/acquire`
 
-Acquires or renews a lease for a workflow and returns the current fencing token.
+Acquires a lease for a workflow and returns the current fencing token.
 
 `POST /api/v1/sessions/{profile_id}/renew`
 
@@ -127,7 +171,11 @@ Lists workflows currently waiting for authentication, network, provider, human i
 
 `GET /api/v1/audit`
 
-Lists the most recent audit events. Optional query parameter: `workflow_id`; optional `limit` defaults to 100 and is capped at 1000.
+Lists recent audit events. Optional `workflow_id`; `limit` defaults to 100 and is capped at 1000.
+
+`GET /api/v1/audit/verify`
+
+Validates the audit hash chain.
 
 ## Request and Response Examples
 
@@ -137,19 +185,16 @@ Check liveness:
 curl -i http://127.0.0.1:8765/health
 ```
 
-Check authenticated status with Python:
+Check authenticated status:
 
-```python
-from pathlib import Path
-import httpx
+```bash
+curl -H "X-Atrin-Token: $TOKEN" http://127.0.0.1:8765/api/v1/status
+```
 
-token = Path('.atrin_data/runtime_secret.token').read_text().strip()
-response = httpx.get(
-    'http://127.0.0.1:8765/api/v1/status',
-    headers={'X-Atrin-Token': token},
-)
-response.raise_for_status()
-print(response.json())
+Inspect configured providers:
+
+```bash
+curl -H "X-Atrin-Token: $TOKEN" http://127.0.0.1:8765/api/v1/provider-catalog
 ```
 
 Create a workflow:
@@ -158,7 +203,17 @@ Create a workflow:
 curl -X POST http://127.0.0.1:8765/api/v1/workflows \
   -H "Content-Type: application/json" \
   -H "X-Atrin-Token: $TOKEN" \
+  -H "Idempotency-Key: example-request-1" \
   -d '{"goal":"example","plan":[]}'
+```
+
+Create a provider profile:
+
+```bash
+curl -X POST http://127.0.0.1:8765/api/v1/providers \
+  -H "Content-Type: application/json" \
+  -H "X-Atrin-Token: $TOKEN" \
+  -d '{"profile_id":"my-profile","provider_id":"my-api","account_id":"account-1","name":"My API account"}'
 ```
 
 ## Error Codes
@@ -168,8 +223,9 @@ curl -X POST http://127.0.0.1:8765/api/v1/workflows \
 | `200 OK` | Request completed successfully. | Authenticated and public endpoints |
 | `201 Created` | Resource was created. | Workflow and provider creation |
 | `401 Unauthorized` | Token is missing or invalid. | Protected `/api/v1/*` endpoints |
-| `404 Not Found` | Resource does not exist. | Workflow, step, or provider/session routes |
-| `409 Conflict` | Execution/session conflict, stale lease, or another recoverability constraint. | Workflow run/resume and session operations |
+| `404 Not Found` | Resource does not exist. | Workflow, step, provider/session routes |
+| `409 Conflict` | Execution/session conflict, stale lease, duplicate provider profile, or another safety constraint. | Workflow, provider, and session operations |
+| `422 Unprocessable Entity` | Request or provider configuration failed validation. | Create/configuration endpoints |
 | `500 Internal Server Error` | Unexpected server-side exception. | Runtime and future endpoints |
 
 The API currently uses FastAPI's `detail` error shape rather than a separate versioned error envelope.
@@ -178,8 +234,9 @@ The API currently uses FastAPI's `detail` error shape rather than a separate ver
 
 Developers integrating directly with the Python core can use:
 
-- `AtrinDatabase(db_path)` for SQLite initialization, safety pragmas, and forward migrations.
+- `AtrinDatabase(db_path)` for SQLite initialization, safety pragmas, and forward-compatible additive migrations.
 - `SessionManager` for provider profiles, leases, and fencing.
+- `ProviderAdapterRegistry` for configuration-driven provider discovery and adapter construction.
 - `WorkflowEngine.create_workflow(goal, plan)` for durable workflow creation.
 - `WorkflowEngine.get_workflow_state(workflow_id)` for durable state reads.
 - `WorkflowEngine.execute_step(workflow_id, step_id)` for adapter-backed execution.
@@ -187,4 +244,4 @@ Developers integrating directly with the Python core can use:
 - `RecoveryEngine` for checkpoint-based recovery.
 - `LocalSecurityManager` for local runtime token creation and validation.
 
-Provider-specific behavior must remain behind adapter contracts. Persisting a provider profile does not by itself instantiate an external adapter; runtime wiring must supply the adapter implementation appropriate for that provider.
+Provider-specific behavior must remain behind adapter contracts. Provider profiles persist account context; the registry determines which executable adapter is available for a provider.
