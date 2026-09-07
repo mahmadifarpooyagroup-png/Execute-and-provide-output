@@ -1,5 +1,8 @@
+import json
+
 from fastapi.testclient import TestClient
 
+from atrin_core.provider_registry import ProviderAdapterRegistry
 from atrin_core.runtime import create_app
 from atrin_core.security import LocalSecurityManager
 
@@ -32,6 +35,30 @@ def test_status_endpoint_with_valid_token(tmp_path):
     assert response.status_code == 200
     assert response.json()["status"] == "operational"
     assert response.json()["version"] == "0.3.0"
+
+
+def test_provider_catalog_exposes_configured_adapters(tmp_path):
+    registry = ProviderAdapterRegistry()
+    registry.register({
+        "id": "demo-api",
+        "name": "Demo API",
+        "adapter_id": "openai-compatible",
+        "endpoint": "http://127.0.0.1:9000/v1",
+        "metadata": {
+            "api": {"model": "demo-model", "api_key_env": "DEMO_API_KEY"},
+            "capabilities": ["chat"],
+        },
+    })
+    db_path = str(tmp_path / "runtime.db")
+    token_path = str(tmp_path / "runtime.token")
+    app = create_app(db_path=db_path, token_path=token_path, provider_registry=registry)
+    token = LocalSecurityManager(token_file_path=token_path).get_or_create_token()
+    client = TestClient(app)
+
+    response = client.get("/api/v1/provider-catalog", headers={"X-Atrin-Token": token})
+    assert response.status_code == 200
+    assert response.json()["items"][0]["id"] == "demo-api"
+    assert response.json()["items"][0]["adapter_id"] == "openai-compatible"
 
 
 def test_idempotent_workflow_creation_and_pagination(tmp_path):
@@ -127,3 +154,11 @@ def test_runtime_rejects_invalid_token(tmp_path):
     client, _ = build_client(tmp_path)
     response = client.get("/api/v1/workflows", headers={"X-Atrin-Token": "wrong"})
     assert response.status_code == 401
+
+
+def test_provider_registry_json_round_trip(tmp_path, monkeypatch):
+    config = tmp_path / "providers.json"
+    config.write_text(json.dumps([{"id": "web", "adapter_id": "generic-web", "endpoint": "data:text/html,<body></body>"}]), encoding="utf-8")
+    monkeypatch.setenv("ATRIN_PROVIDERS_FILE", str(config))
+    loaded = ProviderAdapterRegistry.from_environment()
+    assert loaded.get("web").adapter_id == "generic-web"
