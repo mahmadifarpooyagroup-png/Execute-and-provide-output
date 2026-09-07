@@ -15,7 +15,7 @@ FRONTEND_URL = "http://127.0.0.1:5173"
 E2E_TOKEN = "atrin-ui-e2e-token-8e5de6d1d1c54284a6d7f1f7"
 
 
-def wait_for_http(url: str, timeout: float = 30.0) -> None:
+def wait_for_http(url: str, timeout: float = 45.0) -> None:
     deadline = time.time() + timeout
     last_error: Exception | None = None
     while time.time() < deadline:
@@ -52,6 +52,15 @@ def browser_servers(tmp_path_factory):
         "ATRIN_UI_E2E_PORT": "8765",
         "VITE_ATRIN_API_URL": RUNTIME_URL,
     })
+    build = subprocess.run(
+        ["npm", "run", "build"],
+        cwd="frontend",
+        env=env,
+        check=True,
+        timeout=120,
+        capture_output=True,
+        text=True,
+    )
     runtime = subprocess.Popen(
         [sys.executable, "tests/ui_e2e_server.py"],
         env=env,
@@ -60,16 +69,20 @@ def browser_servers(tmp_path_factory):
         text=True,
     )
     frontend = subprocess.Popen(
-        ["npm", "run", "dev", "--", "--host", "127.0.0.1", "--port", "5173"],
+        ["npm", "run", "preview", "--", "--host", "127.0.0.1", "--port", "5173", "--strictPort"],
         cwd="frontend",
         env=env,
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     )
     try:
         wait_for_http(f"{RUNTIME_URL}/health")
-        wait_for_http(FRONTEND_URL)
+        try:
+            wait_for_http(FRONTEND_URL)
+        except RuntimeError as error:
+            output = frontend.stdout.read() if frontend.stdout is not None else ""
+            raise RuntimeError(f"Frontend preview failed: {error}\n{output}\nBuild output:\n{build.stdout}\n{build.stderr}") from error
         yield frontend, runtime
     finally:
         stop_process(frontend)
