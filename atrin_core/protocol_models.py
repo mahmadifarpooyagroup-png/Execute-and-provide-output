@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -17,6 +17,8 @@ class MCPConfig(BaseModel):
     transport: str = "streamable-http"
     capabilities: List[str] = Field(default_factory=list)
     auth_token: Optional[str] = None
+    default_tool: Optional[str] = Field(default=None, min_length=1, max_length=256)
+    default_arguments: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ACPConfig(BaseModel):

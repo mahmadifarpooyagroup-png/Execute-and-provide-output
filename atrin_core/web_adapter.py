@@ -6,6 +6,7 @@ import json
 import re
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, BrowserContext, Page, Playwright
@@ -159,7 +160,7 @@ class GenericWebAdapter(IProviderAdapter):
                     el.removeAttribute('value');
                     el.textContent = '';
                 });
-                clone.querySelectorAll('[type="password"],[name*="token" i],[name*="secret" i],[name*="authorization" i],[data-token]')
+                clone.querySelectorAll('[type="password"],[name*="token" i],[name*="secret" i],[name*="authorization" i],[data-token],[data-secret]')
                     .forEach(el => el.replaceChildren(document.createTextNode('[REDACTED]')));
                 clone.querySelectorAll('[value]').forEach(el => el.removeAttribute('value'));
                 return clone.innerHTML;
@@ -167,8 +168,8 @@ class GenericWebAdapter(IProviderAdapter):
             """
         )
         evidence: dict[str, Any] = {
-            "response_text": await strategy.extract_response(),
-            "page_state": {"url": page.url, "title": await page.title()},
+            "response_text": self._redact_text(await strategy.extract_response()),
+            "page_state": {"url": self._safe_page_url(page.url), "title": await page.title()},
             "dom": self._redact_text(str(dom)),
             "operation_id": self._last_operation_id,
         }
@@ -199,6 +200,23 @@ class GenericWebAdapter(IProviderAdapter):
             finally:
                 await page.evaluate("(id) => document.getElementById(id)?.remove()", style_id)
         return evidence
+
+    @staticmethod
+    def _safe_page_url(value: str) -> str:
+        """Keep origin/path for evidence while removing credentials, query, and fragment."""
+        try:
+            parsed = urlsplit(value)
+            if not parsed.scheme or not parsed.hostname:
+                return value.split("?", 1)[0].split("#", 1)[0]
+            netloc = parsed.hostname
+            try:
+                if parsed.port:
+                    netloc = f"{netloc}:{parsed.port}"
+            except ValueError:
+                pass
+            return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+        except ValueError:
+            return value.split("?", 1)[0].split("#", 1)[0]
 
     @staticmethod
     def _redact_text(value: str) -> str:

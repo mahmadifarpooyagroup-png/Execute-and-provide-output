@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 from typing import Any, Dict, Optional
 
 import httpx
@@ -10,7 +11,7 @@ from .protocol_models import MCPConfig, ProtocolConnection, ProtocolType
 
 
 class MCPAdapter(IProviderAdapter):
-    """MCP Streamable HTTP adapter for the stateless 2026-07-28 model."""
+    """MCP Streamable HTTP adapter with explicit tool/argument semantics."""
 
     PROTOCOL_VERSION = "2026-07-28"
 
@@ -62,18 +63,46 @@ class MCPAdapter(IProviderAdapter):
         idempotency_key: Optional[str] = None,
         operation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        if not tool_name.strip():
+            raise ValueError("MCP tool_name cannot be empty")
         await self._ensure_connected()
         response = await self._rpc("tools/call", params={"name": tool_name, "arguments": arguments}, name=tool_name)
         result = response.get("result", response)
         normalized = result if isinstance(result, dict) else {"result": result}
+        normalized.setdefault("tool_name", tool_name)
         self._last_operation_key = idempotency_key
         self._last_operation_id = operation_id
         self._last_operation_result = normalized
         return normalized
 
+    def _resolve_tool_action(self, action: str) -> tuple[str, Dict[str, Any]]:
+        raw = action.strip()
+        if not raw:
+            raise ValueError("MCP action cannot be empty")
+
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = None
+
+        if isinstance(payload, dict) and any(key in payload for key in ("tool", "tool_name", "name")):
+            tool_name = payload.get("tool_name") or payload.get("tool") or payload.get("name")
+            arguments = payload.get("arguments", payload.get("args", {}))
+            if not isinstance(tool_name, str) or not tool_name.strip():
+                raise ValueError("MCP structured action requires a non-empty tool name")
+            if not isinstance(arguments, dict):
+                raise ValueError("MCP structured action arguments must be an object")
+            return tool_name.strip(), arguments
+
+        if self.config.default_tool:
+            return self.config.default_tool, dict(self.config.default_arguments)
+
+        return raw, {}
+
     async def execute(self, action: str, idempotency_key: str, *, operation_id: str | None = None,
                       fencing_token: int | None = None) -> Dict[str, Any]:
-        return await self.call_tool(action, {}, idempotency_key=idempotency_key, operation_id=operation_id)
+        tool_name, arguments = self._resolve_tool_action(action)
+        return await self.call_tool(tool_name, arguments, idempotency_key=idempotency_key, operation_id=operation_id)
 
     async def verify_action(self, idempotency_key: str, *, operation_id: str | None = None) -> str:
         if self._last_operation_key != idempotency_key or self._last_operation_id != operation_id:
