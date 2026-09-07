@@ -194,9 +194,9 @@ class PluginManager:
                     if imported_name.split(".", 1)[0] in cls._BLOCKED_IMPORTS:
                         raise ValueError(f"Plugin import is not allowed: {imported_name}")
             elif isinstance(node, ast.ImportFrom):
-                imported_name = node.module
-                if imported_name and imported_name.split(".", 1)[0] in cls._BLOCKED_IMPORTS:
-                    raise ValueError(f"Plugin import is not allowed: {imported_name}")
+                module_name = node.module
+                if module_name and module_name.split(".", 1)[0] in cls._BLOCKED_IMPORTS:
+                    raise ValueError(f"Plugin import is not allowed: {module_name}")
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in cls._BLOCKED_CALLS:
                 raise ValueError(f"Plugin call is not allowed: {node.func.id}")
             if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
