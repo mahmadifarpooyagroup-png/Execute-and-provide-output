@@ -69,13 +69,10 @@ def _plugin_worker(plugin_path: str, connection: Any) -> None:
     except Exception as error:
         try:
             connection.send({"ok": False, "error": f"{type(error).__name__}: {error}"})
-        except Exception:
-            pass
+        except (BrokenPipeError, EOFError, OSError):
+            return
     finally:
-        try:
-            connection.close()
-        except Exception:
-            pass
+        connection.close()
 
 
 class _PluginProxy(IPlugin):
@@ -126,10 +123,7 @@ class _PluginProxy(IPlugin):
 
     def cleanup(self) -> None:
         if not self._process.is_alive():
-            try:
-                self._parent.close()
-            except Exception:
-                pass
+            self._parent.close()
             return
         try:
             self._parent.send({"command": "cleanup"})
