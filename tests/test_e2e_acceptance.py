@@ -14,14 +14,15 @@ class MockWorkflowAdapter:
         self.fail_next = False
         self.verification = "NOT_STARTED"
 
-    async def execute(self, action, idempotency_key, *, fencing_token=None):
+    async def execute(self, action, idempotency_key, *, operation_id=None, fencing_token=None):
         self.calls.append((action, idempotency_key, fencing_token))
         if self.fail_next:
             self.fail_next = False
             raise RuntimeError("Simulated network failure after dispatch")
-        return {"result": "ok", "evidence": f"{action} executed successfully"}
+        self.verification = "CONFIRMED"
+        return {"result": "ok", "evidence": f"{action} executed successfully", "operation_id": operation_id}
 
-    async def verify_action(self, idempotency_key):
+    async def verify_action(self, idempotency_key, *, operation_id=None):
         return self.verification
 
 
