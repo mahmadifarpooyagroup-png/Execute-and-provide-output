@@ -100,7 +100,7 @@ def test_execute_step_confirms_and_is_idempotent():
         temporary_directory.cleanup()
 
 
-def test_protected_step_requires_and_renews_exclusive_fence():
+def test_protected_step_requires_and_uses_exclusive_fence():
     adapter = MockAdapter("CONFIRMED")
     temporary_directory, database, engine, _ = build_engine(adapter, protected=True)
     try:
@@ -136,15 +136,22 @@ def test_idempotency_collision_is_rejected():
 
 def test_resume_confirmed_action_skips_execution():
     adapter = MockAdapter("CONFIRMED")
-    temporary_directory, _, engine, _ = build_engine(adapter)
+    temporary_directory, database, engine, _ = build_engine(adapter)
     try:
         workflow_id = make_workflow(engine)
-        asyncio.run(engine.save(workflow_id, {
+        connection = database.get_connection()
+        operation_id = connection.execute("SELECT operation_id FROM steps WHERE step_id='step-1'").fetchone()[0]
+        connection.execute(
+            "INSERT INTO idempotency_ledger(idempotency_key,workflow_id,step_id,provider_id,operation_id,status,confirmed_at) VALUES (?,?,?,?,?,'CONFIRMED',CURRENT_TIMESTAMP)",
+            ("key-1", workflow_id, "step-1", "provider-a", operation_id),
+        )
+        connection.commit()
+        connection.close()
+        result = asyncio.run(engine.resume_workflow(workflow_id, {
             "step_id": "step-1", "provider_id": "provider-a",
-            "action_idempotency_key": "key-1", "operation_id": "operation-1", "state": "WAITING_FOR_NETWORK",
-        }))
-        result = asyncio.run(engine.resume_workflow(workflow_id))
-        assert result.skipped_action is True
+            "action_idempotency_key": "key-1", "operation_id": operation_id, "state": "WAITING_FOR_NETWORK",
+        }, skip_action=True))
+        assert result["state"] == "COMPLETED"
         assert adapter.calls == []
         assert engine.get_workflow_state(workflow_id) == WorkflowState.COMPLETED
     finally:
@@ -160,8 +167,7 @@ def test_expired_in_progress_is_verified_before_replay():
         operation_id = connection.execute("SELECT operation_id FROM steps WHERE step_id='step-1'").fetchone()[0]
         expired = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
         connection.execute(
-            "INSERT INTO idempotency_ledger(idempotency_key, workflow_id, step_id, provider_id, operation_id, status, expires_at, claim_owner, attempt) "
-            "VALUES (?, ?, ?, ?, ?, 'IN_PROGRESS', ?, ?, 1)",
+            "INSERT INTO idempotency_ledger(idempotency_key, workflow_id, step_id, provider_id, operation_id, status, expires_at, claim_owner, attempt) VALUES (?, ?, ?, ?, ?, 'IN_PROGRESS', ?, ?, 1)",
             ("key-1", workflow_id, "step-1", "provider-a", operation_id, expired, "dead-worker"),
         )
         connection.execute("UPDATE steps SET status='EXECUTING' WHERE step_id='step-1'")
@@ -186,8 +192,7 @@ def test_expired_in_progress_with_ambiguous_verifier_pauses_workflow():
         operation_id = connection.execute("SELECT operation_id FROM steps WHERE step_id='step-1'").fetchone()[0]
         expired = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
         connection.execute(
-            "INSERT INTO idempotency_ledger(idempotency_key, workflow_id, step_id, provider_id, operation_id, status, expires_at, claim_owner, attempt) "
-            "VALUES (?, ?, ?, ?, ?, 'IN_PROGRESS', ?, ?, 1)",
+            "INSERT INTO idempotency_ledger(idempotency_key, workflow_id, step_id, provider_id, operation_id, status, expires_at, claim_owner, attempt) VALUES (?, ?, ?, ?, ?, 'IN_PROGRESS', ?, ?, 1)",
             ("key-1", workflow_id, "step-1", "provider-a", operation_id, expired, "dead-worker"),
         )
         connection.commit()
@@ -236,7 +241,6 @@ def test_cancel_requires_provider_confirmation_when_action_is_running():
     try:
         engine.session_manager.create_profile("profile-1", "provider-a", "account-1", "Profile")
         workflow_id = make_workflow(engine, protected=True)
-        # Seed the durable state as if an external action were currently running.
         connection = database.get_connection()
         operation_id = connection.execute("SELECT operation_id FROM steps WHERE step_id='step-1'").fetchone()[0]
         connection.execute("UPDATE workflows SET state='EXECUTING' WHERE workflow_id=?", (workflow_id,))
