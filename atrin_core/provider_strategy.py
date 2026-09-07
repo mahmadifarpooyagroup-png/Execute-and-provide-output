@@ -32,6 +32,6 @@ class ProviderInteractionStrategy(ABC):
     async def detect_completion(self) -> bool:
         raise NotImplementedError
 
-    async def verify_action(self, idempotency_key: str) -> bool:
+    async def verify_action(self, idempotency_key: str, *, operation_id: str | None = None) -> bool:
         """Return True only when the provider can correlate the requested action with its result."""
         return False
