@@ -249,7 +249,7 @@ class ProviderAdapterRegistry:
         items: list[dict[str, Any]] = []
         for provider in sorted(self.providers.values(), key=lambda item: (item.priority, item.name, item.id)):
             capabilities = self.normalize_capabilities(provider.metadata.get("capabilities"))
-            if provider.adapter_id.lower() in {"api", "chat-completions"}:
+            if provider.adapter_id.lower() in {"api", "chat-completions", "openai-compatible"}:
                 capabilities.update({"chat", "text", "api"})
             elif provider.adapter_id.lower() in {"web", "generic-web"}:
                 capabilities.update({"web", "browser"})
@@ -348,6 +348,7 @@ ProviderAdapterRegistry.register_factory("web", _web_factory)
 ProviderAdapterRegistry.register_factory("generic-web", _web_factory)
 ProviderAdapterRegistry.register_factory("api", _api_factory)
 ProviderAdapterRegistry.register_factory("chat-completions", _api_factory)
+ProviderAdapterRegistry.register_factory("openai-compatible", _api_factory)
 ProviderAdapterRegistry.register_factory("mcp", _mcp_factory)
 ProviderAdapterRegistry.register_factory("a2a", _a2a_factory)
 ProviderAdapterRegistry.register_factory("acp", _acp_factory)
