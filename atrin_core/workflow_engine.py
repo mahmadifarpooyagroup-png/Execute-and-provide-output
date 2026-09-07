@@ -3,7 +3,7 @@
 import inspect
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Mapping, Protocol
 
 from .database import AtrinDatabase
@@ -22,6 +22,10 @@ async def _call(method: Any, *args: Any, **kwargs: Any) -> Any:
 
 
 class WorkflowEngine:
+    """Vendor-neutral durable workflow engine."""
+
+    _CLAIM_LEASE_SECONDS = 300
+
     def __init__(self, database: AtrinDatabase, adapters: Mapping[str, ActionAdapter] | None = None):
         self.database = database
         self.adapters = dict(adapters or {})
@@ -106,57 +110,113 @@ class WorkflowEngine:
 
     def _step(self, connection: Any, workflow_id: str, step_id: str) -> Any:
         row = connection.execute("""
-            SELECT s.*, t.workflow_id FROM steps s JOIN tasks t ON t.task_id = s.task_id
+            SELECT s.*, t.workflow_id, t.order_index AS task_order
+            FROM steps s JOIN tasks t ON t.task_id = s.task_id
             WHERE s.step_id = ? AND t.workflow_id = ?
         """, (step_id, workflow_id)).fetchone()
         if row is None:
             raise LookupError(f"Step not found: {step_id}")
         return row
 
+    def _assert_step_runnable(self, connection: Any, workflow_id: str, step: Any) -> None:
+        workflow = connection.execute(
+            "SELECT state FROM workflows WHERE workflow_id = ?", (workflow_id,)
+        ).fetchone()
+        if workflow is None:
+            raise LookupError(f"Workflow not found: {workflow_id}")
+        if workflow["state"] == WorkflowState.CANCELLED.value:
+            raise RuntimeError("Workflow is cancelled")
+        if workflow["state"] == WorkflowState.COMPLETED.value:
+            raise RuntimeError("Workflow is already completed")
+
+        previous_task = connection.execute("""
+            SELECT task_id FROM tasks
+            WHERE workflow_id = ? AND order_index < ? AND status != 'COMPLETED'
+            ORDER BY order_index LIMIT 1
+        """, (workflow_id, step["task_order"])).fetchone()
+        if previous_task is not None:
+            raise RuntimeError(f"Previous task is not completed: {previous_task['task_id']}")
+
+        previous_step = connection.execute("""
+            SELECT step_id FROM steps
+            WHERE task_id = ? AND order_index < ? AND status != 'CONFIRMED'
+            ORDER BY order_index LIMIT 1
+        """, (step["task_id"], step["order_index"])).fetchone()
+        if previous_step is not None:
+            raise RuntimeError(f"Previous step is not confirmed: {previous_step['step_id']}")
+
+    async def _verify_existing_action(self, adapter: ActionAdapter, key: str) -> str:
+        status = await _call(adapter.verify_action, key)
+        return str(status).upper()
+
     async def execute_step(self, workflow_id: str, step_id: str) -> Any:
         connection = self.database.get_connection()
         try:
             step = self._step(connection, workflow_id, step_id)
+            self._assert_step_runnable(connection, workflow_id, step)
             adapter = self.adapters.get(step["provider_id"])
             if adapter is None:
                 raise LookupError(f"No adapter registered for provider: {step['provider_id']}")
 
-            ledger_record = connection.execute(
-                "SELECT status FROM idempotency_ledger WHERE idempotency_key = ?",
+            ledger = connection.execute(
+                "SELECT status, expires_at FROM idempotency_ledger WHERE idempotency_key = ?",
                 (step["idempotency_key"],),
             ).fetchone()
-            if ledger_record and ledger_record["status"] == "CONFIRMED":
+            if ledger and ledger["status"] == "CONFIRMED":
                 existing = connection.execute(
-                    "SELECT result, evidence, status FROM steps WHERE step_id = ?",
-                    (step_id,),
+                    "SELECT result, evidence FROM steps WHERE step_id = ?", (step_id,)
                 ).fetchone()
-                connection.execute(
-                    "UPDATE workflows SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE workflow_id = ?",
-                    (WorkflowState.OBSERVING.value, workflow_id),
-                )
-                self._checkpoint(connection, workflow_id, {
-                    "task_id": step["task_id"], "step_id": step_id,
-                    "state": WorkflowState.OBSERVING.value,
-                    "current_action": step["action"], "provider_id": step["provider_id"],
-                    "action_idempotency_key": step["idempotency_key"],
-                    "last_result": existing["result"], "evidence": existing["evidence"],
-                    "checkpoint_version": 1,
-                })
-                connection.commit()
                 return {"result": existing["result"], "evidence": existing["evidence"]}
 
-            connection.execute("UPDATE workflows SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE workflow_id = ?",
-                               (WorkflowState.EXECUTING.value, workflow_id))
-            before = {"task_id": step["task_id"], "step_id": step_id, "state": WorkflowState.EXECUTING.value,
-                      "current_action": step["action"], "provider_id": step["provider_id"],
-                      "action_idempotency_key": step["idempotency_key"], "last_result": None,
-                      "evidence": None, "checkpoint_version": 1}
-            self._checkpoint(connection, workflow_id, before)
-            connection.execute("""
-                INSERT INTO idempotency_ledger (idempotency_key, workflow_id, step_id, provider_id, status)
-                VALUES (?, ?, ?, ?, 'PENDING')
-                ON CONFLICT(idempotency_key) DO UPDATE SET status = 'PENDING'
-            """, (step["idempotency_key"], workflow_id, step_id, step["provider_id"]))
+            if ledger and ledger["status"] in {"PENDING", "IN_PROGRESS"}:
+                verified = await self._verify_existing_action(adapter, step["idempotency_key"])
+                if verified == "CONFIRMED":
+                    connection.execute(
+                        "UPDATE steps SET status='CONFIRMED' WHERE step_id=?", (step_id,)
+                    )
+                    connection.execute(
+                        "UPDATE idempotency_ledger SET status='CONFIRMED', confirmed_at=CURRENT_TIMESTAMP, expires_at=NULL WHERE idempotency_key=?",
+                        (step["idempotency_key"],),
+                    )
+                    connection.commit()
+                    return await self.execute_step(workflow_id, step_id)
+                if verified not in {"NOT_STARTED", "FAILED"}:
+                    raise RuntimeError(
+                        f"Action {step['idempotency_key']} cannot be safely replayed; verifier returned {verified}"
+                    )
+
+            connection.execute("BEGIN IMMEDIATE")
+            now = datetime.now(timezone.utc)
+            expires = (now + timedelta(seconds=self._CLAIM_LEASE_SECONDS)).isoformat()
+            if ledger is None:
+                connection.execute("""
+                    INSERT INTO idempotency_ledger
+                    (idempotency_key, workflow_id, step_id, provider_id, status, expires_at)
+                    VALUES (?, ?, ?, ?, 'IN_PROGRESS', ?)
+                """, (step["idempotency_key"], workflow_id, step_id, step["provider_id"], expires))
+            else:
+                cursor = connection.execute("""
+                    UPDATE idempotency_ledger
+                    SET status='IN_PROGRESS', expires_at=?
+                    WHERE idempotency_key=? AND status IN ('PENDING','FAILED')
+                """, (expires, step["idempotency_key"]))
+                if cursor.rowcount != 1:
+                    raise RuntimeError("Workflow step is already claimed by another execution")
+
+            connection.execute(
+                "UPDATE workflows SET state=?, updated_at=CURRENT_TIMESTAMP WHERE workflow_id=?",
+                (WorkflowState.EXECUTING.value, workflow_id),
+            )
+            connection.execute(
+                "UPDATE steps SET status='EXECUTING' WHERE step_id=?", (step_id,)
+            )
+            self._checkpoint(connection, workflow_id, {
+                "task_id": step["task_id"], "step_id": step_id,
+                "state": WorkflowState.EXECUTING.value,
+                "current_action": step["action"], "provider_id": step["provider_id"],
+                "action_idempotency_key": step["idempotency_key"],
+                "last_result": None, "evidence": None, "checkpoint_version": 1,
+            })
             connection.commit()
         finally:
             connection.close()
@@ -171,24 +231,65 @@ class WorkflowEngine:
 
         connection = self.database.get_connection()
         try:
-            connection.execute("UPDATE steps SET status = ?, result = ?, evidence = ? WHERE step_id = ?",
-                               (status, str(result_value), evidence, step_id))
-            connection.execute("UPDATE workflows SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE workflow_id = ?",
-                               (WorkflowState.OBSERVING.value if status == "CONFIRMED" else WorkflowState.FAILED.value, workflow_id))
-            connection.execute("""
-                UPDATE idempotency_ledger SET status = ?, confirmed_at = CASE WHEN ? = 'CONFIRMED' THEN CURRENT_TIMESTAMP ELSE confirmed_at END
-                WHERE idempotency_key = ?
-            """, (status, status, step["idempotency_key"]))
+            current = connection.execute(
+                "SELECT state FROM workflows WHERE workflow_id=?", (workflow_id,)
+            ).fetchone()
+            if current is None:
+                raise LookupError(f"Workflow not found: {workflow_id}")
+            if current["state"] == WorkflowState.CANCELLED.value:
+                connection.execute(
+                    "UPDATE steps SET status=?, result=?, evidence=? WHERE step_id=? AND status='EXECUTING'",
+                    ("CANCELLED" if status == "CONFIRMED" else "FAILED", str(result_value), evidence, step_id),
+                )
+                connection.execute(
+                    "UPDATE idempotency_ledger SET status=? WHERE idempotency_key=? AND status='IN_PROGRESS'",
+                    ("CONFIRMED" if status == "CONFIRMED" else "FAILED", step["idempotency_key"]),
+                )
+                connection.commit()
+                raise RuntimeError("Workflow was cancelled while the external action was running")
+
+            connection.execute(
+                "UPDATE steps SET status=?, result=?, evidence=? WHERE step_id=? AND status='EXECUTING'",
+                (status, str(result_value), evidence, step_id),
+            )
+            if status == "CONFIRMED":
+                connection.execute(
+                    "UPDATE idempotency_ledger SET status='CONFIRMED', confirmed_at=CURRENT_TIMESTAMP, expires_at=NULL WHERE idempotency_key=? AND status='IN_PROGRESS'",
+                    (step["idempotency_key"],),
+                )
+                task_counts = connection.execute(
+                    "SELECT COUNT(*) AS total, SUM(CASE WHEN status='CONFIRMED' THEN 1 ELSE 0 END) AS done FROM steps WHERE task_id=?",
+                    (step["task_id"],),
+                ).fetchone()
+                if task_counts["total"] and task_counts["done"] == task_counts["total"]:
+                    connection.execute("UPDATE tasks SET status='COMPLETED' WHERE task_id=?", (step["task_id"],))
+                remaining = connection.execute(
+                    "SELECT COUNT(*) AS n FROM tasks WHERE workflow_id=? AND status!='COMPLETED'",
+                    (workflow_id,),
+                ).fetchone()["n"]
+                next_state = WorkflowState.COMPLETED if remaining == 0 else WorkflowState.OBSERVING
+            else:
+                connection.execute(
+                    "UPDATE idempotency_ledger SET status='FAILED', expires_at=NULL WHERE idempotency_key=? AND status='IN_PROGRESS'",
+                    (step["idempotency_key"],),
+                )
+                next_state = WorkflowState.FAILED
+
+            connection.execute(
+                "UPDATE workflows SET state=?, updated_at=CURRENT_TIMESTAMP WHERE workflow_id=?",
+                (next_state.value, workflow_id),
+            )
             self._checkpoint(connection, workflow_id, {
                 "task_id": step["task_id"], "step_id": step_id,
-                "state": WorkflowState.OBSERVING.value if status == "CONFIRMED" else WorkflowState.FAILED.value,
+                "state": next_state.value,
                 "current_action": step["action"], "provider_id": step["provider_id"],
-                "action_idempotency_key": step["idempotency_key"], "last_result": str(result_value),
-                "evidence": evidence, "checkpoint_version": 1,
+                "action_idempotency_key": step["idempotency_key"],
+                "last_result": str(result_value), "evidence": evidence, "checkpoint_version": 1,
             })
             connection.commit()
         finally:
             connection.close()
+
         if status == "FAILED":
             raise RuntimeError(str(result_value))
         return result
@@ -211,7 +312,7 @@ class WorkflowEngine:
                 pending_step = connection.execute("""
                     SELECT s.step_id, s.task_id, s.action, s.provider_id, s.idempotency_key
                     FROM steps s JOIN tasks t ON t.task_id = s.task_id
-                    WHERE t.workflow_id = ? AND s.status = 'PENDING'
+                    WHERE t.workflow_id = ? AND s.status IN ('PENDING','EXECUTING')
                     ORDER BY t.order_index, s.order_index LIMIT 1
                 """, (workflow_id,)).fetchone()
             finally:
@@ -236,32 +337,53 @@ class WorkflowEngine:
             if checkpoint is None:
                 raise LookupError(f"No checkpoint found for workflow {workflow_id}")
             adapter = self.adapters.get(checkpoint.get("provider_id"))
+            if adapter is None:
+                raise LookupError(f"No adapter registered for provider: {checkpoint.get('provider_id')}")
             recovery_engine = RecoveryEngine(
                 checkpoint_store=self,
                 workflow_controller=self,
                 external_state_verifier=adapter,
             )
-            result = await recovery_engine.resume_from_checkpoint(workflow_id)
-            return result
+            return await recovery_engine.resume_from_checkpoint(workflow_id)
+
+        checkpoint = dict(checkpoint)
         connection = self.database.get_connection()
         try:
-            connection.execute("UPDATE workflows SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE workflow_id = ?",
-                               (WorkflowState.RECOVERING.value, workflow_id))
-            checkpoint = dict(checkpoint)
+            step = self._step(connection, workflow_id, checkpoint.get("step_id", ""))
+            if checkpoint.get("provider_id") not in (None, step["provider_id"]):
+                raise ValueError("Checkpoint provider does not match the durable step")
+            if checkpoint.get("action_idempotency_key") not in (None, step["idempotency_key"]):
+                raise ValueError("Checkpoint idempotency key does not match the durable step")
+            checkpoint["provider_id"] = step["provider_id"]
+            checkpoint["action_idempotency_key"] = step["idempotency_key"]
+
+            if skip_action:
+                # The external verifier has already established that the side
+                # effect happened. Persist that fact instead of leaving the
+                # workflow stuck in RECOVERING.
+                connection.execute("UPDATE steps SET status='CONFIRMED' WHERE step_id=?", (step["step_id"],))
+                connection.execute("UPDATE idempotency_ledger SET status='CONFIRMED', confirmed_at=CURRENT_TIMESTAMP, expires_at=NULL WHERE idempotency_key=?", (step["idempotency_key"],))
+                connection.execute("UPDATE tasks SET status='COMPLETED' WHERE task_id=? AND NOT EXISTS (SELECT 1 FROM steps WHERE task_id=? AND status!='CONFIRMED')", (step["task_id"], step["task_id"]))
+                remaining = connection.execute("SELECT COUNT(*) AS n FROM tasks WHERE workflow_id=? AND status!='COMPLETED'", (workflow_id,)).fetchone()["n"]
+                final_state = WorkflowState.COMPLETED if remaining == 0 else WorkflowState.OBSERVING
+                connection.execute("UPDATE workflows SET state=?, updated_at=CURRENT_TIMESTAMP WHERE workflow_id=?", (final_state.value, workflow_id))
+                checkpoint["state"] = final_state.value
+                self._checkpoint(connection, workflow_id, checkpoint)
+                connection.commit()
+                return checkpoint
+
+            connection.execute("UPDATE workflows SET state=?, updated_at=CURRENT_TIMESTAMP WHERE workflow_id = ?", (WorkflowState.RECOVERING.value, workflow_id))
             checkpoint["state"] = WorkflowState.RECOVERING.value
             self._checkpoint(connection, workflow_id, checkpoint)
             connection.commit()
         finally:
             connection.close()
-        if skip_action:
-            return checkpoint
         return await self.execute_step(workflow_id, checkpoint["step_id"])
 
     async def cancel_workflow(self, workflow_id: str) -> None:
         connection = self.database.get_connection()
         try:
-            connection.execute("UPDATE workflows SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE workflow_id = ?",
-                               (WorkflowState.CANCELLED.value, workflow_id))
+            connection.execute("UPDATE workflows SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE workflow_id = ?", (WorkflowState.CANCELLED.value, workflow_id))
             checkpoint = await self.load(workflow_id) or {"workflow_id": workflow_id}
             checkpoint["state"] = WorkflowState.CANCELLED.value
             self._checkpoint(connection, workflow_id, checkpoint)

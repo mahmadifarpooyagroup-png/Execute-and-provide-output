@@ -18,7 +18,7 @@ class CheckpointStore(Protocol):
 
 class WorkflowController(Protocol):
     async def pause_workflow(self, workflow_id: str, state: str) -> None: ...
-    async def resume_workflow(self, workflow_id: str, checkpoint: Mapping[str, Any], skip_action: bool = False) -> None: ...
+    async def resume_workflow(self, workflow_id: str, checkpoint: Mapping[str, Any], skip_action: bool = False) -> Any: ...
 
 
 class ExternalStateVerifier(Protocol):
@@ -141,7 +141,21 @@ class RecoveryEngine:
         if status == "CONFIRMED":
             await _call(self.workflow_controller.resume_workflow, workflow_id, checkpoint, skip_action=True)
             return ResumeResult(workflow_id, status, resumed=True, skipped_action=True)
+
         if status in {"FAILED", "NOT_STARTED"}:
             await _call(self.workflow_controller.resume_workflow, workflow_id, checkpoint)
             return ResumeResult(workflow_id, status, resumed=True)
+
+        if status in {"AUTH_REQUIRED", "LOGIN_REQUIRED", "AUTH_CHALLENGE"}:
+            await self._pause(workflow_id, checkpoint, WorkflowState.WAITING_FOR_AUTH.value)
+            return ResumeResult(workflow_id, status, resumed=False)
+
+        if status in {"NETWORK_UNAVAILABLE", "NETWORK_ERROR", "TIMEOUT"}:
+            await self._pause(workflow_id, checkpoint, WorkflowState.WAITING_FOR_NETWORK.value)
+            return ResumeResult(workflow_id, status, resumed=False)
+
+        # Never silently treat an ambiguous external state as safe to replay.
+        # The workflow remains paused until a human/provider-specific verifier
+        # can establish whether the side effect happened.
+        await self._pause(workflow_id, checkpoint, WorkflowState.WAITING_FOR_PROVIDER.value)
         return ResumeResult(workflow_id, status, resumed=False)
