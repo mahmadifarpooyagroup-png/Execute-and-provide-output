@@ -3,6 +3,7 @@ export interface RuntimeWorkflow {
   goal: string
   state: string
   plan_version: number
+  client_request_id?: string | null
   created_at: string
   updated_at: string
   progress?: number
@@ -41,15 +42,15 @@ const API_BASE = (import.meta.env.VITE_ATRIN_API_URL || 'http://127.0.0.1:8765')
 const TOKEN_STORAGE_KEY = 'atrin.runtime.token'
 
 export function getRuntimeToken(): string | null {
-  return window.localStorage.getItem(TOKEN_STORAGE_KEY)
+  return window.sessionStorage.getItem(TOKEN_STORAGE_KEY)
 }
 
 export function setRuntimeToken(token: string): void {
-  window.localStorage.setItem(TOKEN_STORAGE_KEY, token)
+  window.sessionStorage.setItem(TOKEN_STORAGE_KEY, token)
 }
 
 export function clearRuntimeToken(): void {
-  window.localStorage.removeItem(TOKEN_STORAGE_KEY)
+  window.sessionStorage.removeItem(TOKEN_STORAGE_KEY)
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -69,38 +70,40 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       payload = raw
     }
   }
-
   if (!response.ok) {
     const detail = typeof payload === 'object' && payload !== null && 'detail' in payload
       ? String((payload as { detail: unknown }).detail)
       : `Runtime API request failed (${response.status})`
     throw new Error(detail)
   }
-
   return payload as T
 }
 
-export async function getStatus(): Promise<{ status: string; message: string; database: string }> {
+export function isRuntimeApiAvailable(): boolean {
+  return Boolean(API_BASE)
+}
+
+export async function getStatus(): Promise<{ status: string; message: string; database: string; version: string }> {
   return request('/api/v1/status')
 }
 
-export async function getProviders(): Promise<RuntimeProvider[]> {
-  const response = await request<{ items: RuntimeProvider[] }>('/api/v1/providers')
+export async function getProviders(limit = 100, offset = 0): Promise<RuntimeProvider[]> {
+  const response = await request<{ items: RuntimeProvider[] }>(`/api/v1/providers?limit=${limit}&offset=${offset}`)
   return response.items
 }
 
-export async function getWorkflows(): Promise<RuntimeWorkflow[]> {
-  const response = await request<{ items: RuntimeWorkflow[] }>('/api/v1/workflows')
+export async function getWorkflows(limit = 100, offset = 0): Promise<RuntimeWorkflow[]> {
+  const response = await request<{ items: RuntimeWorkflow[] }>(`/api/v1/workflows?limit=${limit}&offset=${offset}`)
   return response.items
 }
 
-export async function getRecoveryQueue(): Promise<RuntimeRecoveryItem[]> {
-  const response = await request<{ items: RuntimeRecoveryItem[] }>('/api/v1/recovery')
+export async function getRecoveryQueue(limit = 100, offset = 0): Promise<RuntimeRecoveryItem[]> {
+  const response = await request<{ items: RuntimeRecoveryItem[] }>(`/api/v1/recovery?limit=${limit}&offset=${offset}`)
   return response.items
 }
 
-export async function getAudit(workflowId?: string): Promise<RuntimeAuditItem[]> {
-  const query = workflowId ? `?workflow_id=${encodeURIComponent(workflowId)}` : ''
+export async function getAudit(workflowId?: string, limit = 100): Promise<RuntimeAuditItem[]> {
+  const query = workflowId ? `?workflow_id=${encodeURIComponent(workflowId)}&limit=${limit}` : `?limit=${limit}`
   const response = await request<{ items: RuntimeAuditItem[] }>(`/api/v1/audit${query}`)
   return response.items
 }
