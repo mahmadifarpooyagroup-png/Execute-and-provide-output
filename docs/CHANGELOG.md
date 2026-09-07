@@ -8,7 +8,7 @@
 
 ## v2.3.0
 
-Atrin v2.3 completes the 13-phase implementation described by the master specification.
+Atrin v2.3 completes the implementation described by the master specification.
 
 ### Completed phases
 
@@ -36,6 +36,7 @@ Atrin v2.3 completes the 13-phase implementation described by the master specifi
 - Checkpoint storage and recovery for transient failures.
 - Idempotency ledger to prevent duplicate confirmed side effects.
 - Audit logging for workflow and lifecycle events.
+- Operational REST API for workflows, sessions/profiles, recovery, and audit queries.
 - Recovery Center and operational UI routes.
 - Tauri 2 Windows packaging configuration with NSIS and WebView2 offline installer support.
 - Automated core acceptance and UI smoke validation.
@@ -48,21 +49,23 @@ Atrin v2.3 completes the 13-phase implementation described by the master specifi
 - Added local runtime token validation for the authenticated status endpoint.
 - Corrected frontend route and navigation declarations for the desktop UI shell.
 - Added idempotent database schema initialization and WAL configuration.
+- Bound recovery verification to the durable provider adapter rather than using a generic verifier.
+- Added provider-scoped idempotency ownership checks and expired-claim verification before reclaim.
+- Added checkpoint revision checks to prevent lost updates during concurrent recovery.
+- Added explicit verifier-confirmation audit events and ambiguous-action pause handling.
 
 ## Breaking Changes
 
 - The runtime is local-only by default and binds to `127.0.0.1`; deployments must deliberately design any remote access boundary.
 - `/api/v1/status` requires the `X-Atrin-Token` header.
-- There is no supported public REST CRUD contract yet for workflows, sessions, providers, or recovery; integrations must use the Python core APIs until those routes are added.
-- The React UI is a scaffold backed by mock data and should not be treated as a live operational console.
+- Operational routes are intentionally local and must be protected before any remote exposure.
 - Windows packaging requires a Windows build environment with Rust stable, WebView2, and the required native build tools.
 
 ## Known Issues
 
-- The frontend does not yet call the Python runtime; dashboard, provider, workflow, recovery, and settings data are deterministic mock values.
+- External provider and real API calls remain deterministic adapter implementations in the test environment; production provider credentials and endpoints still need deployment-specific configuration.
 - The first-run wizard is navigable, but its Continue setup action is not wired to persistence.
-- UI smoke tests validate route declarations and bindings at source level, not full browser interaction.
-- External provider and real API calls remain stubbed for deterministic tests.
+- UI smoke tests validate source-level bindings and route declarations; they do not replace full production-browser acceptance.
 - The repository does not ship a Dockerfile, compose file, production service unit, or reverse-proxy configuration.
 - The Windows installer has not been built in the current Linux/Codespace environment.
 
