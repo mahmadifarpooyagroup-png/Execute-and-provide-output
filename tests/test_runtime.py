@@ -1,64 +1,124 @@
-import os
-import tempfile
+import asyncio
+
 from fastapi.testclient import TestClient
+
+from atrin_core.models import Step, Task
+from atrin_core.runtime import create_app
 from atrin_core.security import LocalSecurityManager
 
-def get_test_app(token_file_path: str):
-    """Create a test app with custom token file path"""
-    from fastapi import FastAPI, Depends, HTTPException, Header
-    from typing import Optional
-    
-    app = FastAPI(title="Atrin Local Control Plane", version="0.1.0")
-    
-    def get_security_manager() -> LocalSecurityManager:
-        return LocalSecurityManager(token_file_path=token_file_path)
-    
-    def require_auth(
-        x_atrin_token: Optional[str] = Header(None), 
-        security: LocalSecurityManager = Depends(get_security_manager)
-    ):
-        if not x_atrin_token or not security.validate_token(x_atrin_token):
-            raise HTTPException(status_code=401, detail="Invalid or missing Atrin runtime token")
-        return True
-    
-    @app.get("/health")
-    async def health_check():
-        return {"status": "healthy", "service": "atrin-control-plane"}
-    
-    @app.get("/api/v1/status")
-    async def get_status(authenticated: bool = Depends(require_auth)):
-        return {"status": "operational", "message": "Local runtime is secure and running"}
-    
-    return app
 
-def test_health_endpoint_public():
-    from atrin_core.runtime import app
-    client = TestClient(app)
+def build_client(tmp_path):
+    db_path = str(tmp_path / "runtime.db")
+    token_path = str(tmp_path / "runtime.token")
+    app = create_app(db_path=db_path, token_path=token_path)
+    security = LocalSecurityManager(token_file_path=token_path)
+    token = security.get_or_create_token()
+    return TestClient(app), token
+
+
+def test_health_endpoint_public(tmp_path):
+    client, _ = build_client(tmp_path)
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "healthy"
 
-def test_status_endpoint_requires_auth():
-    from atrin_core.runtime import app
-    client = TestClient(app)
+
+def test_status_endpoint_requires_auth(tmp_path):
+    client, _ = build_client(tmp_path)
     response = client.get("/api/v1/status")
     assert response.status_code == 401
 
-def test_status_endpoint_with_valid_token():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        token_file = os.path.join(tmpdir, "test.token")
-        security = LocalSecurityManager(token_file_path=token_file)
-        valid_token = security.get_or_create_token()
-        
-        app = get_test_app(token_file_path=token_file)
-        client = TestClient(app)
-        
-        response = client.get("/api/v1/status", headers={"X-Atrin-Token": valid_token})
-        assert response.status_code == 200
-        assert response.json()["status"] == "operational"
 
-def test_status_endpoint_with_invalid_token():
-    from atrin_core.runtime import app
-    client = TestClient(app)
-    response = client.get("/api/v1/status", headers={"X-Atrin-Token": "wrong_token"})
+def test_status_endpoint_with_valid_token(tmp_path):
+    client, token = build_client(tmp_path)
+    response = client.get("/api/v1/status", headers={"X-Atrin-Token": token})
+    assert response.status_code == 200
+    assert response.json()["status"] == "operational"
+
+
+def test_runtime_workflow_provider_session_and_audit_endpoints(tmp_path):
+    client, token = build_client(tmp_path)
+    headers = {"X-Atrin-Token": token}
+
+    response = client.post(
+        "/api/v1/providers",
+        json={
+            "profile_id": "profile-1",
+            "provider_id": "provider-1",
+            "account_id": "account-1",
+            "name": "Provider One",
+        },
+        headers=headers,
+    )
+    assert response.status_code == 201
+
+    plan = [{
+        "task_id": "task-1",
+        "description": "do work",
+        "steps": [{
+            "step_id": "step-1",
+            "action": "noop",
+            "provider_id": "provider-1",
+            "idempotency_key": "runtime-key-1",
+            "provider_profile_id": "profile-1",
+        }],
+    }]
+    response = client.post("/api/v1/workflows", json={"goal": "test", "plan": plan}, headers=headers)
+    assert response.status_code == 201
+    workflow_id = response.json()["workflow_id"]
+
+    response = client.get("/api/v1/workflows", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["items"][0]["workflow_id"] == workflow_id
+
+    response = client.get(f"/api/v1/workflows/{workflow_id}", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["steps"][0]["step_id"] == "step-1"
+
+    response = client.post(
+        "/api/v1/sessions/profile-1/acquire",
+        json={"workflow_id": workflow_id},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    fencing_token = response.json()["fencing_token"]
+
+    response = client.get("/api/v1/sessions", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["items"][0]["lock_owner"] == workflow_id
+
+    response = client.post(
+        "/api/v1/sessions/profile-1/renew",
+        json={"workflow_id": workflow_id, "fencing_token": fencing_token},
+        headers=headers,
+    )
+    assert response.status_code == 200
+
+    response = client.post(
+        f"/api/v1/workflows/{workflow_id}/pause",
+        json={"reason": "network outage"},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert response.json()["state"] == "WAITING_FOR_NETWORK"
+
+    response = client.get("/api/v1/recovery", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["items"][0]["workflow_id"] == workflow_id
+
+    response = client.get(f"/api/v1/audit?workflow_id={workflow_id}", headers=headers)
+    assert response.status_code == 200
+    assert any(row["event_type"] == "WORKFLOW_CREATED" for row in response.json()["items"])
+
+    response = client.post(
+        "/api/v1/sessions/profile-1/release",
+        json={"workflow_id": workflow_id, "fencing_token": fencing_token},
+        headers=headers,
+    )
+    assert response.status_code == 200
+
+
+def test_runtime_rejects_invalid_token(tmp_path):
+    client, _ = build_client(tmp_path)
+    response = client.get("/api/v1/workflows", headers={"X-Atrin-Token": "wrong"})
     assert response.status_code == 401
