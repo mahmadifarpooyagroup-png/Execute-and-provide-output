@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useState } from 'react'
+import { FormEvent, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { createProviderProfile, getProviderCatalog, type RuntimeProviderCatalogItem } from '../services/api'
 import { useAppStore } from '../store/appStore'
@@ -16,31 +16,37 @@ export function ProvidersPage() {
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
 
-  const loadCatalog = useCallback(async () => {
+  useEffect(() => {
+    let active = true
+    void loadProviders().catch(() => undefined)
     setCatalogLoading(true)
     setCatalogError(null)
-    try {
-      const items = await getProviderCatalog()
-      setCatalog(items)
-      if (!providerId && items.length > 0) setProviderId(items[0].id)
-    } catch (catalogLoadError) {
-      setCatalogError(catalogLoadError instanceof Error ? catalogLoadError.message : String(catalogLoadError))
-    } finally {
-      setCatalogLoading(false)
+    void getProviderCatalog()
+      .then((items) => {
+        if (active) setCatalog(items)
+      })
+      .catch((catalogLoadError) => {
+        if (active) setCatalogError(catalogLoadError instanceof Error ? catalogLoadError.message : String(catalogLoadError))
+      })
+      .finally(() => {
+        if (active) setCatalogLoading(false)
+      })
+    return () => {
+      active = false
     }
-  }, [providerId])
-
-  useEffect(() => {
-    void loadProviders().catch(() => undefined)
-    void loadCatalog()
-  }, [loadCatalog, loadProviders])
+  }, [loadProviders])
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    const effectiveProviderId = providerId || catalog[0]?.id || ''
+    if (!effectiveProviderId) {
+      setFormError(t('no_provider_adapters'))
+      return
+    }
     setSaving(true)
     setFormError(null)
     try {
-      await createProviderProfile({ profile_id: profileId.trim(), provider_id: providerId, account_id: accountId.trim(), name: name.trim() })
+      await createProviderProfile({ profile_id: profileId.trim(), provider_id: effectiveProviderId, account_id: accountId.trim(), name: name.trim() })
       setProfileId('')
       setAccountId('')
       setName('')
@@ -51,6 +57,8 @@ export function ProvidersPage() {
       setSaving(false)
     }
   }
+
+  const selectedProviderId = providerId || catalog[0]?.id || ''
 
   return (
     <section className="page-grid">
@@ -66,7 +74,7 @@ export function ProvidersPage() {
           <form className="form-grid" onSubmit={submit}>
             <label>
               <span>{t('provider')}</span>
-              <select className="setting-input" value={providerId} onChange={(event) => setProviderId(event.target.value)} required>
+              <select className="setting-input" value={selectedProviderId} onChange={(event) => setProviderId(event.target.value)} required>
                 {catalog.map((item) => (
                   <option key={item.id} value={item.id}>{item.name} · {item.adapter_id}</option>
                 ))}
@@ -84,7 +92,7 @@ export function ProvidersPage() {
               <span>{t('display_name')}</span>
               <input className="setting-input" value={name} onChange={(event) => setName(event.target.value)} placeholder={t('display_name_placeholder')} required />
             </label>
-            <button className="primary-button" type="submit" disabled={saving || !providerId}>
+            <button className="primary-button" type="submit" disabled={saving || !selectedProviderId}>
               {saving ? t('saving') : t('add_provider')}
             </button>
           </form>
