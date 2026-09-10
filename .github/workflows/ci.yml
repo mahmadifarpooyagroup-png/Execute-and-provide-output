@@ -105,8 +105,6 @@ jobs:
   tauri:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    permissions:
-      contents: write
     defaults:
       run:
         working-directory: frontend/src-tauri
@@ -130,30 +128,14 @@ jobs:
           toolchain: stable
           components: rustfmt
           cache: false
-      - name: Synchronize Cargo.lock
-        if: github.event_name == 'push'
+      - name: Verify Cargo.lock is synchronized
         shell: bash
         run: |
           cargo generate-lockfile
-          if ! git diff --quiet -- frontend/src-tauri/Cargo.lock; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add frontend/src-tauri/Cargo.lock
-            git commit -m "chore(tauri): synchronize Cargo.lock [skip ci]"
-            git push
-          fi
-      - name: Format Rust sources
-        if: github.event_name == 'push'
-        shell: bash
-        run: |
-          cargo fmt --all
-          if ! git diff --quiet -- frontend/src-tauri; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add frontend/src-tauri
-            git commit -m "style(tauri): apply rustfmt [skip ci]"
-            git push
-          fi
+          git diff --exit-code -- frontend/src-tauri/Cargo.lock || {
+            echo "Cargo.lock is out of sync. Update it locally and commit the change."
+            exit 1
+          }
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
       - name: Check Tauri Rust project
