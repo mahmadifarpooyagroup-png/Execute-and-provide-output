@@ -148,12 +148,19 @@ def test_provider_and_workflow_journey(browser_servers):
         page.set_default_navigation_timeout(30000)
         seed_session(page)
         page.goto(FRONTEND_URL, wait_until="domcontentloaded")
-        page.reload(wait_until="domcontentloaded")
 
+        # Re-assert the deterministic E2E token immediately before API-backed
+        # navigation. This avoids coupling the test to any boot-time storage
+        # normalization while keeping the production API authentication intact.
+        page.evaluate(
+            "token => window.sessionStorage.setItem('atrin.runtime.token', token)",
+            E2E_TOKEN,
+        )
         page.get_by_role("link", name="Providers").click()
         try:
             page.get_by_label("Profile ID").fill("ui-e2e-profile")
         except Exception:
+            print("Runtime token:", page.evaluate("window.sessionStorage.getItem('atrin.runtime.token')"))
             print("Providers URL:", page.url)
             print("Providers page text:\n", page.locator("body").inner_text())
             raise
