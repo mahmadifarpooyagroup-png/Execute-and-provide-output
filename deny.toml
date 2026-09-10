@@ -5,8 +5,8 @@ targets = [
 ]
 
 [advisories]
-unmaintained = "warn"
-unsound = "deny"
+unmaintained = "workspace"
+unsound = "workspace"
 
 [bans]
 multiple-versions = "warn"
