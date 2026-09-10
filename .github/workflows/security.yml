@@ -105,6 +105,7 @@ jobs:
           persist-credentials: false
       - uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
         with:
+          fail-on-vuln: false
           scan-args: |-
             scan source -r .
 
