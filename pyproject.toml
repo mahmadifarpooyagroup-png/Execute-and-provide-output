@@ -27,7 +27,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools>=68.0,<81.0"]
+requires = ["setuptools>=68.0,<85.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
