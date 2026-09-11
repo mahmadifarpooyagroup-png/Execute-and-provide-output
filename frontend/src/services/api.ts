@@ -287,3 +287,13 @@ export async function runWorkflowStep(workflowId: string, stepId: string): Promi
     body: JSON.stringify({ step_id: stepId }),
   })
 }
+
+// FIX (بند ۲/۱۵): give the retentionDays setting a real backend consumer
+export async function runHousekeeping(retentionDays: number): Promise<{
+  retention_days: number
+  workflows_deleted: number
+}> {
+  return request(`/api/v1/housekeeping/run?retention_days=${encodeURIComponent(String(retentionDays))}`, {
+    method: 'POST',
+  })
+}
