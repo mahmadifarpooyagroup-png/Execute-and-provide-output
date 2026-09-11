@@ -59,3 +59,29 @@ def test_app_redirects_new_users_to_wizard():
     assert "Navigate" in app_source
     assert "/wizard" in app_source
     assert "/dashboard" in app_source
+
+
+def test_recovery_center_consumes_auto_recover_setting():
+    """
+    FIX (بند ۲/۱۵): autoRecover must actually trigger automatic resume,
+    not just sit in localStorage as inert stored state.
+    """
+    source = _read_file("frontend/src/pages/RecoveryCenter.tsx")
+    assert "settings.autoRecover" in source
+    assert "resumeWorkflow" in source
+
+
+def test_settings_page_wires_housekeeping():
+    """
+    FIX (بند ۲/۱۵): retentionDays must have a real consumer — the
+    housekeeping endpoint — reachable from the Settings page.
+    """
+    source = _read_file("frontend/src/pages/Settings.tsx")
+    assert "runHousekeeping" in source
+    assert "settings.retentionDays" in source
+    assert "onClick" in source
+
+
+def test_api_service_exposes_housekeeping_endpoint():
+    api_source = _read_file("frontend/src/services/api.ts")
+    assert "/api/v1/housekeeping/run" in api_source
