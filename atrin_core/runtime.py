@@ -365,6 +365,20 @@ def create_app(
     def verify_audit(authenticated: bool = Depends(require_auth)) -> dict[str, bool]:
         return {"valid": workflow_engine.validate_audit_chain()}
 
+    # FIX (بند ۲/۱۵): retentionDays was stored in Settings with no real
+    # consumer. This endpoint lets the frontend (or the user) actually
+    # purge old terminal workflows according to that setting.
+    @app.post("/api/v1/housekeeping/run")
+    def run_housekeeping(
+        retention_days: int = Query(30, ge=1, le=3650),
+        authenticated: bool = Depends(require_auth),
+    ) -> dict:
+        try:
+            deleted = database.purge_workflows_older_than(retention_days)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {"retention_days": retention_days, "workflows_deleted": deleted}
+
     return app
 
 
