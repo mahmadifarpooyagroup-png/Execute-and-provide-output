@@ -64,5 +64,10 @@
   "side_effecting_action": "This action changes external state",
   "no_provider_profiles": "Add a provider profile before creating a workflow.",
   "no_runnable_step": "No runnable step is available for this workflow.",
-  "run_next": "Run next"
+  "run_next": "Run next",
+  "authenticate_provider": "Authenticate",
+  "logout_provider": "Log out",
+  "auto_recovery_active": "Auto-recovery is on — queued workflows will resume automatically.",
+  "run_housekeeping_now": "Run cleanup now",
+  "housekeeping_result": "Deleted {{count}} old workflow(s)."
 }
