@@ -49,6 +49,21 @@ class AtrinDatabase:
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS external_operations (
+                idempotency_key  TEXT NOT NULL,
+                workflow_id      TEXT NOT NULL,
+                step_id          TEXT NOT NULL,
+                provider_id      TEXT NOT NULL,
+                adapter_type     TEXT NOT NULL,
+                operation_id     TEXT,
+                external_id      TEXT,
+                external_status  TEXT,
+                created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (idempotency_key, workflow_id, step_id)
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

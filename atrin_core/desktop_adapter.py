@@ -110,7 +110,13 @@ class GenericDesktopAdapter(IProviderAdapter):
         if self.fallback_handler is not None:
             return {"element_id": element_id, "action": action, "value": value,
                     "status": self.fallback_handler(element_id, action)}
-        return {"element_id": element_id, "action": action, "value": value, "status": "fallback-not-available"}
+        # FIX (بند ۷): was silently returning fallback-not-available which could be
+        # mistaken for success. Raise so the engine records AMBIGUOUS/FAILED properly.
+        raise RuntimeError(
+            f"Desktop interaction failed: no backend could execute action={action!r} "
+            f"on element={element_id!r}. "
+            f"Errors: {self.fallback_errors[-3:]}"
+        )
 
     @staticmethod
     def _supports_keyword(method: Any, name: str) -> bool:

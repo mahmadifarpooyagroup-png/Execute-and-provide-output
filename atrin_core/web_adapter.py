@@ -203,10 +203,19 @@ class GenericWebAdapter(IProviderAdapter):
 
     @staticmethod
     def _safe_page_url(value: str) -> str:
-        """Keep origin/path for evidence while removing credentials, query, and fragment."""
+        """
+        Strip query string and fragment from a URL before storing as evidence.
+
+        This prevents OAuth codes (?code=), session tokens (?state=, ?token=),
+        API keys (?api_key=), and other credential-bearing query parameters from
+        appearing in the evidence/audit record.
+
+        Only scheme + netloc (without userinfo) + path are kept.
+        """
         try:
             parsed = urlsplit(value)
             if not parsed.scheme or not parsed.hostname:
+                # Fallback for opaque/relative values: strip from '?' onward
                 return value.split("?", 1)[0].split("#", 1)[0]
             netloc = parsed.hostname
             try:
@@ -214,14 +223,30 @@ class GenericWebAdapter(IProviderAdapter):
                     netloc = f"{netloc}:{parsed.port}"
             except ValueError:
                 pass
+            # Strip query (sensitive tokens) and fragment; never include userinfo
             return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
         except ValueError:
             return value.split("?", 1)[0].split("#", 1)[0]
 
     @staticmethod
     def _redact_text(value: str) -> str:
-        value = re.sub(r"(?i)(authorization|bearer|token|secret|password)=([^&\s<]+)", r"\1=[REDACTED]", value)
-        return re.sub(r"(?i)((?:authorization|token|secret|password)\s*[:=]\s*)[^\s,;<]+", r"\1[REDACTED]", value)[:200_000]
+        """Redact credential-bearing tokens from text/HTML evidence."""
+        # URL query-parameter style: key=value
+        _QUERY_PARAM_PATTERN = re.compile(
+            r"(?i)(authorization|bearer|token|secret|password|api[_-]?key|"
+            r"access[_-]?token|refresh[_-]?token|id[_-]?token|code|state|"
+            r"client[_-]?secret|private[_-]?key)=([^&\s<>\"'`]+)",
+            re.IGNORECASE,
+        )
+        # Header / JSON-ish style: key: value or key=value with surrounding whitespace
+        _HEADER_PATTERN = re.compile(
+            r"(?i)((?:authorization|bearer|x-api-key|token|secret|password)"
+            r"\s*[:=]\s*)[^\s,;<>\"'`]+",
+            re.IGNORECASE,
+        )
+        value = _QUERY_PARAM_PATTERN.sub(r"\1=[REDACTED]", value)
+        value = _HEADER_PATTERN.sub(r"\1[REDACTED]", value)
+        return value[:200_000]
 
     async def execute(
         self,

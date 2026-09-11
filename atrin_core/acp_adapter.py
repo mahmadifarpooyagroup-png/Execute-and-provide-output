@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 import httpx
+from typing import Optional as _Opt
+from .external_op_store import ExternalOperationStore
 
 from .interfaces import IProviderAdapter
 from .protocol_models import ACPConfig, ProtocolConnection, ProtocolType
@@ -22,6 +24,10 @@ class ACPAdapter(IProviderAdapter):
         self._last_operation_key: Optional[str] = None
         self._last_operation_id: Optional[str] = None
         self._last_result: Optional[Dict[str, Any]] = None
+        # Phase-A fix: durable external operation store (None = no persistence)
+        self._store: _Opt[ExternalOperationStore] = None
+        self._provider_id: str = "acp"
+        self._step_context: dict = {}
 
     def _url(self, suffix: str) -> str:
         base = self.config.agent_path.rstrip("/")
@@ -84,6 +90,17 @@ class ACPAdapter(IProviderAdapter):
         self.config.session_id = None
 
     async def verify_action(self, idempotency_key: str, *, operation_id: str | None = None) -> str:
+        # FIX (بند ۱۱): re-hydrate from DB if memory was cleared by restart
+        if (self._last_operation_key != idempotency_key or self._last_result is None) and self._store:
+            row = self._store.fetch(
+                idempotency_key=idempotency_key,
+                workflow_id=self._step_context.get("workflow_id", ""),
+                step_id=self._step_context.get("step_id", ""),
+            )
+            if row and row["external_status"] == "CONFIRMED":
+                self._last_operation_key = idempotency_key
+                self._last_operation_id = row["operation_id"]
+                self._last_result = {"external_id": row["external_id"]}
         if self._last_operation_key != idempotency_key or self._last_operation_id != operation_id or self._last_result is None:
             return "AMBIGUOUS"
         return "CONFIRMED"

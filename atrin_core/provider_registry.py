@@ -9,6 +9,7 @@ import httpx
 
 from .a2a_adapter import A2AAdapter
 from .acp_adapter import ACPAdapter
+from .external_op_store import ExternalOperationStore
 from .interfaces import IProviderAdapter
 from .mcp_adapter import MCPAdapter
 from .models import Provider
@@ -161,11 +162,20 @@ class _ProfileAwareAdapter(IProviderAdapter):
             adapter = self.factory(self.provider, profile_id)
             if profile_id != "default" and hasattr(adapter, "current_fencing_token"):
                 adapter.current_fencing_token = lambda: self._current_fencing_token(profile_id)
+            # FIX (بند ۱): wire ExternalOperationStore to adapters that support it
+            # so verify_action() survives process restart (A2A/ACP/MCP)
+            if hasattr(adapter, "_store") and adapter._store is None:
+                adapter._store = ExternalOperationStore(self.database)
             self._adapters[profile_id] = adapter
         return self._adapters[profile_id]
 
-    async def execute(self, action: str, idempotency_key: str, *, operation_id: str | None = None, fencing_token: int | None = None) -> Any:
+    async def execute(self, action: str, idempotency_key: str, *, operation_id: str | None = None,
+                      fencing_token: int | None = None, step_context: dict | None = None) -> Any:
         adapter = await self._adapter(idempotency_key, operation_id)
+        # FIX (بند ۱): propagate step_context so adapters can persist the
+        # external task/operation ID mapping for durable restart recovery
+        if step_context and hasattr(adapter, "_step_context"):
+            adapter._step_context = step_context
         return await adapter.execute(action, idempotency_key, operation_id=operation_id, fencing_token=fencing_token)
 
     async def verify_action(self, idempotency_key: str, *, operation_id: str | None = None) -> str:

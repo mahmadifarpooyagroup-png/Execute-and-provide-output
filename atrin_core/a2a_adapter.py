@@ -4,6 +4,8 @@ import itertools
 from typing import Any, Dict, Optional
 
 import httpx
+from typing import Optional as _Opt
+from .external_op_store import ExternalOperationStore
 
 from .interfaces import IProviderAdapter
 from .protocol_models import A2AConfig, ProtocolConnection, ProtocolType
@@ -27,6 +29,10 @@ class A2AAdapter(IProviderAdapter):
         self._last_operation_key: Optional[str] = None
         self._last_operation_id: Optional[str] = None
         self._last_task_status: Optional[str] = None
+        # Phase-A fix: durable external operation store (None = no persistence)
+        self._store: _Opt[ExternalOperationStore] = None
+        self._provider_id: str = "a2a"
+        self._step_context: dict = {}
 
     async def discover_agent(self, agent_card_url: Optional[str] = None) -> Dict[str, Any]:
         response = await self._client.get(agent_card_url or self.config.agent_card_url)
@@ -79,6 +85,18 @@ class A2AAdapter(IProviderAdapter):
         self._last_operation_key = idempotency_key
         self._last_operation_id = operation_id
         self._last_task_status = str(result.get("status") or result.get("state") or "unknown").lower()
+        # FIX (بند ۱۰): persist external task mapping for durable recovery after restart
+        if self._store and idempotency_key and self._step_context:
+            self._store.record(
+                idempotency_key=idempotency_key,
+                workflow_id=self._step_context.get("workflow_id", ""),
+                step_id=self._step_context.get("step_id", ""),
+                provider_id=self._provider_id,
+                adapter_type="a2a",
+                operation_id=operation_id,
+                external_id=self._last_task_id,
+                external_status=self._last_task_status,
+            )
         self.protocol_state.state = "TASK_SENT"
         return result
 
@@ -100,13 +118,36 @@ class A2AAdapter(IProviderAdapter):
         )
 
     async def verify_action(self, idempotency_key: str, *, operation_id: str | None = None) -> str:
+        # FIX (بند ۱۰): if in-memory cache is missing (e.g. after restart),
+        # re-hydrate from the durable store before giving up with AMBIGUOUS.
+        if (self._last_operation_key != idempotency_key or not self._last_task_id) and self._store:
+            row = self._store.fetch(
+                idempotency_key=idempotency_key,
+                workflow_id=self._step_context.get("workflow_id", ""),
+                step_id=self._step_context.get("step_id", ""),
+            )
+            if row and row["external_id"]:
+                self._last_task_id = row["external_id"]
+                self._last_operation_key = idempotency_key
+                self._last_operation_id = row["operation_id"]
+                self._last_task_status = row["external_status"]
         if self._last_operation_key != idempotency_key or self._last_operation_id != operation_id or not self._last_task_id:
             return "AMBIGUOUS"
-        status = self._last_task_status
-        if status is None or status not in self.TERMINAL:
+        status = (self._last_task_status or "").lower()
+        # FIX: external_status stored in DB uses our internal terms (CONFIRMED/FAILED)
+        # Map them back to A2A protocol terms before TERMINAL comparison
+        _INTERNAL_TO_A2A = {"confirmed": "completed", "failed": "failed", "ambiguous": "unknown"}
+        status = _INTERNAL_TO_A2A.get(status, status)
+        if status not in self.TERMINAL:
             try:
                 result = await self.poll_task_status(self._last_task_id)
-                status = str(result.get("status") or result.get("state") or "").lower()
+                # A2A response can be {"state": {"status": "completed"}} or {"status": "completed"}
+                raw_state = result.get("state") or {}
+                if isinstance(raw_state, dict):
+                    status = str(raw_state.get("status") or result.get("status") or "").lower()
+                else:
+                    status = str(raw_state or result.get("status") or "").lower()
+                self._last_task_status = status
             except Exception:
                 return "AMBIGUOUS"
         if status in {"completed", "succeeded"}:

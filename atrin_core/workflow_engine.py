@@ -269,12 +269,17 @@ class WorkflowEngine:
         return str(await _call(adapter.verify_action, key, **kwargs)).upper()
 
     async def _execute_action(self, adapter: ActionAdapter, action: str, key: str, operation_id: str,
-                              fencing_token: int | None) -> Any:
+                              fencing_token: int | None,
+                              step_context: dict[str, Any] | None = None) -> Any:
         kwargs: dict[str, Any] = {}
         if _supports_keyword(adapter.execute, "operation_id"):
             kwargs["operation_id"] = operation_id
         if fencing_token is not None and _supports_keyword(adapter.execute, "fencing_token"):
             kwargs["fencing_token"] = fencing_token
+        # FIX (بند ۱): pass step_context so adapters (A2A/MCP/ACP) can persist
+        # the external task ID → durable recovery across restarts
+        if step_context and _supports_keyword(adapter.execute, "step_context"):
+            kwargs["step_context"] = step_context
         return await _call(adapter.execute, action, key, **kwargs)
 
     async def _cancel_action(self, adapter: ActionAdapter, key: str, operation_id: str | None) -> bool:
@@ -476,7 +481,11 @@ class WorkflowEngine:
                 step["provider_profile_id"], workflow_id, int(fencing_token)
             ):
                 raise PermissionError("Execution lease expired or was fenced before dispatch")
-            result = await self._execute_action(adapter, step["action"], key, step["operation_id"], fencing_token)
+            result = await self._execute_action(
+                adapter, step["action"], key, step["operation_id"], fencing_token,
+                step_context={"workflow_id": workflow_id, "step_id": step_id,
+                               "task_id": step["task_id"], "provider_id": step["provider_id"]},
+            )
             evidence = result.get("evidence") if isinstance(result, dict) else None
             result_value = result.get("result", result) if isinstance(result, dict) else result
         except Exception as error:

@@ -5,6 +5,8 @@ import json
 from typing import Any, Dict, Optional
 
 import httpx
+from typing import Optional as _Opt
+from .external_op_store import ExternalOperationStore
 
 from .interfaces import IProviderAdapter
 from .protocol_models import MCPConfig, ProtocolConnection, ProtocolType
@@ -27,6 +29,10 @@ class MCPAdapter(IProviderAdapter):
         self._last_operation_key: Optional[str] = None
         self._last_operation_id: Optional[str] = None
         self._last_operation_result: Optional[Dict[str, Any]] = None
+        # Phase-A fix: durable external operation store (None = no persistence)
+        self._store: _Opt[ExternalOperationStore] = None
+        self._provider_id: str = "mcp"
+        self._step_context: dict = {}
 
     def _url(self) -> str:
         return self.config.server_url.rstrip("/")
@@ -73,6 +79,18 @@ class MCPAdapter(IProviderAdapter):
         self._last_operation_key = idempotency_key
         self._last_operation_id = operation_id
         self._last_operation_result = normalized
+        # FIX (بند ۹): persist tool call result for durable recovery
+        if self._store and idempotency_key and self._step_context:
+            self._store.record(
+                idempotency_key=idempotency_key,
+                workflow_id=self._step_context.get("workflow_id", ""),
+                step_id=self._step_context.get("step_id", ""),
+                provider_id=self._provider_id,
+                adapter_type="mcp",
+                operation_id=operation_id,
+                external_id=normalized.get("id") or normalized.get("tool_use_id"),
+                external_status="CONFIRMED",
+            )
         return normalized
 
     def _resolve_tool_action(self, action: str) -> tuple[str, Dict[str, Any]]:
@@ -105,6 +123,17 @@ class MCPAdapter(IProviderAdapter):
         return await self.call_tool(tool_name, arguments, idempotency_key=idempotency_key, operation_id=operation_id)
 
     async def verify_action(self, idempotency_key: str, *, operation_id: str | None = None) -> str:
+        # FIX (بند ۹): re-hydrate from DB if memory cleared after restart
+        if (self._last_operation_key != idempotency_key or self._last_operation_result is None) and self._store:
+            row = self._store.fetch(
+                idempotency_key=idempotency_key,
+                workflow_id=self._step_context.get("workflow_id", ""),
+                step_id=self._step_context.get("step_id", ""),
+            )
+            if row and row["external_status"] == "CONFIRMED":
+                self._last_operation_key = idempotency_key
+                self._last_operation_id = row["operation_id"]
+                self._last_operation_result = {"external_id": row["external_id"]}
         if self._last_operation_key != idempotency_key or self._last_operation_id != operation_id:
             return "AMBIGUOUS"
         return "CONFIRMED" if self._last_operation_result is not None else "AMBIGUOUS"
