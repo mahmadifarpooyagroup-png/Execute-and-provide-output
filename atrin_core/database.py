@@ -297,20 +297,23 @@ class AtrinDatabase:
                 conn.commit()
                 return 0
 
-            placeholders = ",".join("?" for _ in stale_ids)
-            # Children before parents to satisfy foreign_keys=ON
-            conn.execute(
-                f"DELETE FROM steps WHERE task_id IN "
-                f"(SELECT task_id FROM tasks WHERE workflow_id IN ({placeholders}))",
-                stale_ids,
-            )
-            conn.execute(f"DELETE FROM tasks WHERE workflow_id IN ({placeholders})", stale_ids)
-            conn.execute(f"DELETE FROM workflow_checkpoints WHERE workflow_id IN ({placeholders})", stale_ids)
-            conn.execute(f"DELETE FROM idempotency_ledger WHERE workflow_id IN ({placeholders})", stale_ids)
-            conn.execute(f"DELETE FROM external_operations WHERE workflow_id IN ({placeholders})", stale_ids)
-            conn.execute(f"DELETE FROM audit_log WHERE workflow_id IN ({placeholders})", stale_ids)
-            conn.execute(f"DELETE FROM sync_metadata WHERE workflow_id IN ({placeholders})", stale_ids)
-            conn.execute(f"DELETE FROM workflows WHERE workflow_id IN ({placeholders})", stale_ids)
+            # Delete one workflow at a time with fully static SQL statements.
+            # This keeps the foreign-key ordering explicit and avoids constructing
+            # SQL syntax from runtime values while preserving parameter binding.
+            for workflow_id in stale_ids:
+                conn.execute(
+                    "DELETE FROM steps WHERE task_id IN "
+                    "(SELECT task_id FROM tasks WHERE workflow_id=?)",
+                    (workflow_id,),
+                )
+                conn.execute("DELETE FROM tasks WHERE workflow_id=?", (workflow_id,))
+                conn.execute("DELETE FROM workflow_checkpoints WHERE workflow_id=?", (workflow_id,))
+                conn.execute("DELETE FROM idempotency_ledger WHERE workflow_id=?", (workflow_id,))
+                conn.execute("DELETE FROM external_operations WHERE workflow_id=?", (workflow_id,))
+                conn.execute("DELETE FROM audit_log WHERE workflow_id=?", (workflow_id,))
+                conn.execute("DELETE FROM sync_metadata WHERE workflow_id=?", (workflow_id,))
+                conn.execute("DELETE FROM workflows WHERE workflow_id=?", (workflow_id,))
+
             conn.commit()
             return len(stale_ids)
         except Exception:
