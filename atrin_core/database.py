@@ -266,3 +266,55 @@ class AtrinDatabase:
 
     def get_connection(self) -> sqlite3.Connection:
         return self._configure_connection(sqlite3.connect(self.db_path))
+
+    def purge_workflows_older_than(self, retention_days: int) -> int:
+        """
+        FIX (بند ۲/۱۵): retentionDays was a stored setting with no real
+        consumer. This housekeeping routine deletes terminal workflows
+        (COMPLETED/CANCELLED/FAILED) older than retention_days, along with
+        their dependent rows, in FK-safe order (children before parents).
+        Returns the number of workflows deleted.
+        """
+        if retention_days < 1:
+            raise ValueError("retention_days must be >= 1")
+
+        conn = self.get_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cutoff = conn.execute(
+                "SELECT datetime('now', ?) AS cutoff", (f"-{int(retention_days)} days",)
+            ).fetchone()["cutoff"]
+
+            stale_ids = [
+                row["workflow_id"]
+                for row in conn.execute(
+                    "SELECT workflow_id FROM workflows "
+                    "WHERE state IN ('COMPLETED', 'CANCELLED', 'FAILED') AND updated_at < ?",
+                    (cutoff,),
+                ).fetchall()
+            ]
+            if not stale_ids:
+                conn.commit()
+                return 0
+
+            placeholders = ",".join("?" for _ in stale_ids)
+            # Children before parents to satisfy foreign_keys=ON
+            conn.execute(
+                f"DELETE FROM steps WHERE task_id IN "
+                f"(SELECT task_id FROM tasks WHERE workflow_id IN ({placeholders}))",
+                stale_ids,
+            )
+            conn.execute(f"DELETE FROM tasks WHERE workflow_id IN ({placeholders})", stale_ids)
+            conn.execute(f"DELETE FROM workflow_checkpoints WHERE workflow_id IN ({placeholders})", stale_ids)
+            conn.execute(f"DELETE FROM idempotency_ledger WHERE workflow_id IN ({placeholders})", stale_ids)
+            conn.execute(f"DELETE FROM external_operations WHERE workflow_id IN ({placeholders})", stale_ids)
+            conn.execute(f"DELETE FROM audit_log WHERE workflow_id IN ({placeholders})", stale_ids)
+            conn.execute(f"DELETE FROM sync_metadata WHERE workflow_id IN ({placeholders})", stale_ids)
+            conn.execute(f"DELETE FROM workflows WHERE workflow_id IN ({placeholders})", stale_ids)
+            conn.commit()
+            return len(stale_ids)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
