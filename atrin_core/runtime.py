@@ -9,6 +9,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from .api_errors import api_error, install_error_handlers
 from .database import AtrinDatabase
 from .models import Task, WorkflowState
 from .provider_registry import ProviderAdapterRegistry
@@ -82,6 +83,7 @@ def create_app(
     effective_adapters = dict(adapters) if adapters is not None else registry.build_adapters(database)
     workflow_engine = WorkflowEngine(database, adapters=effective_adapters, session_manager=session_manager)
     app = FastAPI(title="Atrin Local Control Plane", version=API_VERSION)
+    install_error_handlers(app)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_allowed_origins(),
@@ -210,11 +212,11 @@ def create_app(
             result = await workflow_engine.execute_step(workflow_id, request.step_id)
             return {"workflow_id": workflow_id, "step_id": request.step_id, "result": result}
         except LookupError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
+            raise api_error(404, "WORKFLOW_NOT_FOUND", str(error), recoverable=False, workflow_id=workflow_id) from error
         except PermissionError as error:
-            raise HTTPException(status_code=403, detail=str(error)) from error
+            raise api_error(403, "EXECUTION_LEASE_DENIED", str(error), recoverable=True, workflow_id=workflow_id, step_id=request.step_id) from error
         except RuntimeError as error:
-            raise HTTPException(status_code=409, detail="Workflow execution could not be completed safely") from error
+            raise api_error(409, "STEP_EXECUTION_UNSAFE", "Workflow execution could not be completed safely", recoverable=True, workflow_id=workflow_id, step_id=request.step_id, underlying_error=str(error)) from error
 
     @app.post("/api/v1/workflows/{workflow_id}/pause")
     async def pause_workflow(workflow_id: str, request: PauseRequest, authenticated: bool = Depends(require_auth)):
@@ -222,9 +224,9 @@ def create_app(
             await workflow_engine.pause_workflow(workflow_id, request.reason)
             return {"workflow_id": workflow_id, "state": workflow_engine.get_workflow_state(workflow_id).value}
         except LookupError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
+            raise api_error(404, "WORKFLOW_NOT_FOUND", str(error), recoverable=False, workflow_id=workflow_id) from error
         except RuntimeError as error:
-            raise HTTPException(status_code=409, detail="Workflow cannot be paused in its current state") from error
+            raise api_error(409, "WORKFLOW_PAUSE_REJECTED", "Workflow cannot be paused in its current state", recoverable=True, workflow_id=workflow_id) from error
 
     @app.post("/api/v1/workflows/{workflow_id}/resume")
     async def resume_workflow(workflow_id: str, authenticated: bool = Depends(require_auth)):
@@ -232,9 +234,9 @@ def create_app(
             result = await workflow_engine.resume_workflow(workflow_id)
             return {"workflow_id": workflow_id, "result": result}
         except LookupError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
+            raise api_error(404, "WORKFLOW_NOT_FOUND", str(error), recoverable=False, workflow_id=workflow_id) from error
         except RuntimeError as error:
-            raise HTTPException(status_code=409, detail="Workflow cannot be resumed safely") from error
+            raise api_error(409, "WORKFLOW_RESUME_UNSAFE", "Workflow cannot be resumed safely", recoverable=True, workflow_id=workflow_id, underlying_error=str(error)) from error
 
     @app.post("/api/v1/workflows/{workflow_id}/cancel")
     async def cancel_workflow(workflow_id: str, authenticated: bool = Depends(require_auth)):
@@ -242,9 +244,9 @@ def create_app(
             await workflow_engine.cancel_workflow(workflow_id)
             return {"workflow_id": workflow_id, "state": WorkflowState.CANCELLED.value}
         except LookupError as error:
-            raise HTTPException(status_code=404, detail=str(error)) from error
+            raise api_error(404, "WORKFLOW_NOT_FOUND", str(error), recoverable=False, workflow_id=workflow_id) from error
         except RuntimeError as error:
-            raise HTTPException(status_code=409, detail="Workflow cancellation requires provider confirmation") from error
+            raise api_error(409, "PROVIDER_CANCELLATION_UNCONFIRMED", "Workflow cancellation requires provider confirmation", recoverable=True, workflow_id=workflow_id) from error
 
     def _list_provider_profiles(limit: int, offset: int) -> dict:
         connection = database.get_connection()

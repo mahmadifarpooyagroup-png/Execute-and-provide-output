@@ -59,3 +59,11 @@ def test_app_redirects_new_users_to_wizard():
     assert "Navigate" in app_source
     assert "/wizard" in app_source
     assert "/dashboard" in app_source
+
+
+def test_api_client_parses_structured_error_contract():
+    api_source = _read_file("frontend/src/services/api.ts")
+    assert "record.error" in api_source
+    assert "structured.message" in api_source
+    assert "errorCode" in api_source
+    assert "errorRecoverable" in api_source

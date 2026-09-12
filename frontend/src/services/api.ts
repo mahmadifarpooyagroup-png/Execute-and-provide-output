@@ -82,11 +82,15 @@ export interface RuntimeAuditItem {
 
 export class RuntimeApiError extends Error {
   readonly status: number
+  readonly code: string
+  readonly recoverable: boolean | null
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code = 'ERROR', recoverable: boolean | null = null) {
     super(message)
     this.name = 'RuntimeApiError'
     this.status = status
+    this.code = code
+    this.recoverable = recoverable
   }
 }
 
@@ -139,10 +143,21 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       }
     }
     if (!response.ok) {
-      const detail = typeof payload === 'object' && payload !== null && 'detail' in payload
-        ? String((payload as { detail: unknown }).detail)
-        : `Runtime API request failed (${response.status})`
-      throw new RuntimeApiError(detail, response.status)
+      let errorMessage = `Runtime API request failed (${response.status})`
+      let errorCode = 'ERROR'
+      let errorRecoverable: boolean | null = null
+      if (typeof payload === 'object' && payload !== null) {
+        const record = payload as Record<string, unknown>
+        if (typeof record.error === 'object' && record.error !== null) {
+          const structured = record.error as Record<string, unknown>
+          if (typeof structured.message === 'string') errorMessage = structured.message
+          if (typeof structured.code === 'string') errorCode = structured.code
+          if (typeof structured.recoverable === 'boolean') errorRecoverable = structured.recoverable
+        } else if ('detail' in record) {
+          errorMessage = String(record.detail)
+        }
+      }
+      throw new RuntimeApiError(errorMessage, response.status, errorCode, errorRecoverable)
     }
     return payload as T
   } catch (error) {
