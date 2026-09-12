@@ -6,6 +6,7 @@ import importlib.util
 import inspect
 import multiprocessing as mp
 import os
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -15,10 +16,64 @@ from .base import IPlugin
 
 _SAFE_ENV_KEYS = {"PATH", "TEMP", "TMP", "USERPROFILE", "SYSTEMROOT", "COMSPEC", "PATHEXT", "HOME"}
 
+# FIX (بند ۳/۱۵/۲۷): default resource quotas applied to every plugin worker.
+# These are process-level rlimits, not a full OS/container sandbox — they
+# bound CPU time, address space, and process/file-descriptor count so a
+# runaway or malicious plugin cannot exhaust host resources. See
+# docs/FAQ.md 'Are plugins sandboxed?' for the documented limitation:
+# this remains isolation, not a complete sandbox, and untrusted
+# third-party plugin uploads are still not supported.
+_DEFAULT_CPU_SECONDS = 10
+_DEFAULT_MEMORY_BYTES = 256 * 1024 * 1024  # 256 MB address space
+_DEFAULT_MAX_PROCESSES = 8                  # the worker itself + limited forks
+_DEFAULT_MAX_OPEN_FILES = 64
 
-def _plugin_worker(plugin_path: str, connection: Any) -> None:
+
+def _apply_resource_limits(
+    cpu_seconds: int, memory_bytes: int, max_processes: int, max_open_files: int
+) -> None:
+    """
+    FIX (بند ۳/۱۵/۲۷): apply hard rlimits inside the child BEFORE loading any
+    plugin code, so even a plugin that bypasses the AST import blacklist
+    (e.g. via dynamic getattr tricks) cannot fork-bomb, allocate unbounded
+    memory, run forever, or open unlimited file descriptors.
+    """
+    try:
+        import resource
+
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
+        resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+        resource.setrlimit(resource.RLIMIT_NPROC, (max_processes, max_processes))
+        resource.setrlimit(resource.RLIMIT_NOFILE, (max_open_files, max_open_files))
+    except (ImportError, ValueError, OSError):
+        # resource module is POSIX-only (unavailable on Windows) and some
+        # limits may be rejected by the host (e.g. inside certain
+        # containers). Degrade gracefully — the timeout + process-group
+        # kill below remain in effect regardless.
+        pass
+
+
+def _plugin_worker(
+    plugin_path: str,
+    connection: Any,
+    cpu_seconds: int = _DEFAULT_CPU_SECONDS,
+    memory_bytes: int = _DEFAULT_MEMORY_BYTES,
+    max_processes: int = _DEFAULT_MAX_PROCESSES,
+    max_open_files: int = _DEFAULT_MAX_OPEN_FILES,
+) -> None:
     """Load and execute one plugin in a separate spawned process."""
     try:
+        # FIX (بند ۳/۱۵/۲۷): put this worker in its own process group so the
+        # parent can signal the *entire* group (worker + any children it
+        # spawns) on timeout/cleanup instead of only the direct child —
+        # closing the 'grandchild survives after terminate()' gap.
+        if hasattr(os, "setsid"):
+            try:
+                os.setsid()
+            except OSError:
+                pass
+        _apply_resource_limits(cpu_seconds, memory_bytes, max_processes, max_open_files)
+
         inherited_env = dict(os.environ)
         os.environ.clear()
         for key in _SAFE_ENV_KEYS:
@@ -79,29 +134,61 @@ def _plugin_worker(plugin_path: str, connection: Any) -> None:
 class _PluginProxy(IPlugin):
     """Synchronous IPC proxy for a plugin worker."""
 
-    def __init__(self, plugin_path: Path, timeout: float = 30.0):
+    def __init__(
+        self,
+        plugin_path: Path,
+        timeout: float = 30.0,
+        *,
+        cpu_seconds: int = _DEFAULT_CPU_SECONDS,
+        memory_bytes: int = _DEFAULT_MEMORY_BYTES,
+        max_processes: int = _DEFAULT_MAX_PROCESSES,
+        max_open_files: int = _DEFAULT_MAX_OPEN_FILES,
+    ):
         self.plugin_path = plugin_path
         self.metadata: dict[str, str] = {}
         self.timeout = timeout
         context = mp.get_context("spawn")
         self._parent, child = context.Pipe()
-        self._process = context.Process(target=_plugin_worker, args=(str(plugin_path), child), daemon=True)
+        self._process = context.Process(
+            target=_plugin_worker,
+            args=(str(plugin_path), child, cpu_seconds, memory_bytes, max_processes, max_open_files),
+            daemon=True,
+        )
         self._process.start()
         child.close()
         if not self._parent.poll(timeout):
-            self._process.terminate()
-            self._process.join(3)
+            self._kill_process_group()
             raise TimeoutError("Plugin worker initialization timed out")
         response = self._parent.recv()
         if not response.get("ok"):
-            self._process.terminate()
-            self._process.join(3)
+            self._kill_process_group()
             raise RuntimeError(response.get("error", "Plugin worker failed to initialize"))
         metadata = response.get("metadata")
         if not isinstance(metadata, dict):
             self.cleanup()
             raise RuntimeError("Plugin worker returned invalid metadata")
         self.metadata = {str(key): str(value) for key, value in metadata.items()}
+
+    def _kill_process_group(self) -> None:
+        """
+        FIX (بند ۳/۱۵/۲۷): terminate the worker's entire process group, not
+        just the direct child PID. Previously a plugin that spawned a
+        grandchild process could outlive terminate()/cleanup() because only
+        the immediate worker process was signaled. The worker calls
+        os.setsid() at startup, making its PID also its process-group ID.
+        """
+        pid = self._process.pid
+        if pid is not None and hasattr(os, "killpg"):
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        if self._process.is_alive():
+            self._process.terminate()
+        self._process.join(3)
+        if self._process.is_alive():
+            self._process.kill()
+            self._process.join(3)
 
     def get_metadata(self) -> dict:
         return dict(self.metadata)
@@ -114,8 +201,10 @@ class _PluginProxy(IPlugin):
             raise RuntimeError("Plugin worker is not running")
         self._parent.send({"command": "execute", "action": action, "payload": payload})
         if not self._parent.poll(self.timeout):
-            self._process.terminate()
-            self._process.join(3)
+            # FIX (بند ۳/۱۵/۲۷): kill the whole process group on timeout,
+            # not just the direct worker PID, so a hung plugin cannot leave
+            # orphaned children running after we give up waiting.
+            self._kill_process_group()
             raise TimeoutError(f"Plugin execution exceeded {self.timeout}s")
         response = self._parent.recv()
         if not response.get("ok"):
@@ -130,10 +219,12 @@ class _PluginProxy(IPlugin):
             self._parent.send({"command": "cleanup"})
             if self._parent.poll(min(self.timeout, 5.0)):
                 self._parent.recv()
+        except (BrokenPipeError, EOFError, OSError):
+            # Worker already exited (e.g. killed by a resource-limit signal)
+            # between our is_alive() check and send() — nothing more to do.
+            pass
         finally:
-            if self._process.is_alive():
-                self._process.terminate()
-            self._process.join(3)
+            self._kill_process_group()
             self._parent.close()
 
 
@@ -143,13 +234,34 @@ class PluginManager:
     _BLOCKED_IMPORTS = {
         "builtins", "ctypes", "importlib", "os", "pathlib", "shutil", "socket", "subprocess", "sys",
     }
-    _BLOCKED_CALLS = {"__import__", "compile", "eval", "exec", "input", "open"}
+    # FIX (بند ۳/۱۵/۲۷): getattr/setattr/vars/globals/locals are the classic
+    # bypass for the dunder-attribute-access block below — e.g.
+    # getattr(obj, "__globals__") reaches the same forbidden state without
+    # ever appearing as an ast.Attribute node. Block them at the call level.
+    _BLOCKED_CALLS = {
+        "__import__", "compile", "eval", "exec", "input", "open",
+        "getattr", "setattr", "delattr", "vars", "globals", "locals",
+    }
 
-    def __init__(self, worker_timeout: float = 30.0, database: AtrinDatabase | None = None):
+    def __init__(
+        self,
+        worker_timeout: float = 30.0,
+        database: AtrinDatabase | None = None,
+        *,
+        cpu_seconds: int = _DEFAULT_CPU_SECONDS,
+        memory_bytes: int = _DEFAULT_MEMORY_BYTES,
+        max_processes: int = _DEFAULT_MAX_PROCESSES,
+        max_open_files: int = _DEFAULT_MAX_OPEN_FILES,
+    ):
         self._plugins: dict[str, _PluginProxy] = {}
         self._metadata: dict[str, dict] = {}
         self.worker_timeout = worker_timeout
         self.database = database
+        # FIX (بند ۳/۱۵/۲۷): resource quotas applied to every plugin worker
+        self.cpu_seconds = cpu_seconds
+        self.memory_bytes = memory_bytes
+        self.max_processes = max_processes
+        self.max_open_files = max_open_files
 
     def register_plugin(self, plugin_path: str, *, persist: bool = True) -> str:
         path = Path(plugin_path).expanduser().resolve()
@@ -158,7 +270,14 @@ class PluginManager:
         source = path.read_text(encoding="utf-8")
         self._validate_imports(source, path)
 
-        proxy = _PluginProxy(path, self.worker_timeout)
+        proxy = _PluginProxy(
+            path,
+            self.worker_timeout,
+            cpu_seconds=self.cpu_seconds,
+            memory_bytes=self.memory_bytes,
+            max_processes=self.max_processes,
+            max_open_files=self.max_open_files,
+        )
         metadata = proxy.get_metadata()
         plugin_id = metadata["plugin_id"]
         if plugin_id in self._plugins:

@@ -18,7 +18,7 @@ No. Provider examples reference environment variables for credentials. The runti
 
 ## Are plugins sandboxed?
 
-Plugins execute in dedicated worker processes and registry records include a file hash. This is an isolation boundary, not a complete OS/container sandbox. Only trusted administrator-controlled plugins are supported.
+Plugins execute in dedicated worker processes, each placed in its own process group with CPU-time, memory, open-file, and process-count rlimits (`RLIMIT_CPU`, `RLIMIT_AS`, `RLIMIT_NOFILE`, `RLIMIT_NPROC`), and registry records include a file hash. Termination (timeout or cleanup) signals the whole process group, not just the direct worker PID, so a plugin cannot outlive shutdown by spawning children. The import/call AST validator blocks direct dangerous imports and calls, including dynamic dunder-attribute bypasses via `getattr`/`setattr`/`globals`/`locals`/`vars`. This is meaningful process isolation and resource containment, but it is still not a complete OS/container sandbox (no filesystem chroot, no network namespace). Only trusted administrator-controlled plugins are supported; untrusted third-party plugin uploads remain unsupported.
 
 ## Can a workflow safely resume after a crash?
 
