@@ -25,6 +25,15 @@ class ExecutionBus:
         allowed_working_dirs: Optional[list[str]] = None,
         default_max_output_bytes: int = 1_048_576,
         max_argument_length: int = 16_384,
+        # FIX (بند ۱۴/۲۵ — گزارش‌های قبلی): ExecutionBus had timeout + output
+        # limits but no CPU/memory/process-count quota, unlike the plugin
+        # worker sandbox hardened earlier. A single misbehaving action could
+        # still consume unbounded CPU or memory for its full timeout window,
+        # or spawn many descendant processes. These rlimits are applied
+        # inside the child right before exec via preexec_fn.
+        max_cpu_seconds: Optional[int] = None,
+        max_memory_bytes: Optional[int] = 512 * 1024 * 1024,
+        max_child_processes: Optional[int] = 16,
     ):
         self.allowed_env_keys = allowed_env_keys or [
             "PATH", "HOME", "USERPROFILE", "TEMP", "TMP", "SYSTEMROOT",
@@ -33,6 +42,42 @@ class ExecutionBus:
         self.allowed_working_dirs = [Path(value).expanduser().resolve() for value in (allowed_working_dirs or [])]
         self.default_max_output_bytes = default_max_output_bytes
         self.max_argument_length = max_argument_length
+        self.max_cpu_seconds = max_cpu_seconds
+        self.max_memory_bytes = max_memory_bytes
+        self.max_child_processes = max_child_processes
+
+    def _resource_limit_preexec(self) -> Optional[Callable[[], None]]:
+        """
+        Build a preexec_fn that applies RLIMIT_CPU / RLIMIT_AS / RLIMIT_NPROC
+        to the child process before its program image is loaded. Returns
+        None on non-POSIX platforms (Windows) or when no quotas are set,
+        since asyncio.create_subprocess_exec's preexec_fn is POSIX-only.
+        """
+        if sys.platform == "win32":
+            return None
+        if self.max_cpu_seconds is None and self.max_memory_bytes is None and self.max_child_processes is None:
+            return None
+        cpu_seconds = self.max_cpu_seconds
+        memory_bytes = self.max_memory_bytes
+        max_processes = self.max_child_processes
+
+        def _apply() -> None:
+            try:
+                import resource
+
+                if cpu_seconds is not None:
+                    resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
+                if memory_bytes is not None:
+                    resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+                if max_processes is not None:
+                    resource.setrlimit(resource.RLIMIT_NPROC, (max_processes, max_processes))
+                # Start a new session so the whole subtree shares one
+                # process group, matching _terminate_tree's kill scope.
+                os.setsid()
+            except (ImportError, ValueError, OSError):
+                pass
+
+        return _apply
 
     async def execute(
         self,
@@ -63,6 +108,7 @@ class ExecutionBus:
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                preexec_fn=self._resource_limit_preexec(),
             )
         except (FileNotFoundError, OSError) as exc:
             return self._result(action, "failed", 127, start, stderr=str(exc),

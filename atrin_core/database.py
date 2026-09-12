@@ -229,6 +229,11 @@ class AtrinDatabase:
             ("updated_at", "TIMESTAMP"),
         ):
             self._add_column_if_missing(conn, "plugins_registry", column, definition)
+        # FIX (بند ۹/۲۱): track the last remote revision this client observed,
+        # so push_checkpoint() can detect another client's write since our
+        # last pull/push (optimistic concurrency, since generic S3/WebDAV
+        # endpoints cannot be assumed to support conditional PUT/ETag).
+        self._add_column_if_missing(conn, "sync_metadata", "last_known_remote_revision", "INTEGER")
 
         self._backfill_operation_ids(conn)
         self._repair_duplicate_request_ids(conn)
