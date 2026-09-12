@@ -338,11 +338,13 @@ class AtrinDatabase:
 
     def purge_workflows_older_than(self, retention_days: int) -> int:
         """
-        FIX (بند ۲/۱۵): retentionDays was a stored setting with no real
-        consumer. This housekeeping routine deletes terminal workflows
-        (COMPLETED/CANCELLED/FAILED) older than retention_days, along with
-        their dependent rows, in FK-safe order (children before parents).
-        Returns the number of workflows deleted.
+        Delete terminal workflow data older than retention_days.
+
+        Audit entries are intentionally retained because workflow-engine audit
+        records form a global append-only hash chain. Removing a middle entry
+        would make validate_audit_chain() report corruption for all later
+        entries. Audit retention therefore remains independent from workflow
+        data retention.
         """
         if retention_days < 1:
             raise ValueError("retention_days must be >= 1")
@@ -376,7 +378,7 @@ class AtrinDatabase:
                 conn.execute("DELETE FROM workflow_checkpoints WHERE workflow_id=?", (workflow_id,))
                 conn.execute("DELETE FROM idempotency_ledger WHERE workflow_id=?", (workflow_id,))
                 conn.execute("DELETE FROM external_operations WHERE workflow_id=?", (workflow_id,))
-                conn.execute("DELETE FROM audit_log WHERE workflow_id=?", (workflow_id,))
+                # Keep audit_log intact: it is a global hash chain, not child data.
                 conn.execute("DELETE FROM sync_metadata WHERE workflow_id=?", (workflow_id,))
                 conn.execute("DELETE FROM workflows WHERE workflow_id=?", (workflow_id,))
 
