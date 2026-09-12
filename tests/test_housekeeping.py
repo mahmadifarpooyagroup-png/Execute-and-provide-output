@@ -9,6 +9,8 @@ from fastapi.testclient import TestClient
 from atrin_core.database import AtrinDatabase
 from atrin_core.runtime import create_app
 from atrin_core.security import LocalSecurityManager
+from atrin_core.models import Task
+from atrin_core.workflow_engine import WorkflowEngine
 
 
 def _make_db(tmpdir: str) -> AtrinDatabase:
@@ -76,7 +78,7 @@ def test_purge_does_not_touch_active_workflows():
 
 
 def test_purge_deletes_dependent_rows_fk_safe():
-    """Deleting a stale workflow must also remove its tasks/steps/audit — no orphans, no FK errors."""
+    """Deleting stale workflow data removes operational children without breaking retained audit history."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db = _make_db(tmpdir)
         _insert_workflow(db, "wf-cascade", "CANCELLED", "2020-01-01 00:00:00")
@@ -90,9 +92,47 @@ def test_purge_deletes_dependent_rows_fk_safe():
             assert conn.execute(
                 "SELECT COUNT(*) AS n FROM steps WHERE task_id='wf-cascade-task'"
             ).fetchone()["n"] == 0
+            # Audit records are retained separately because they form a global hash chain.
             assert conn.execute(
                 "SELECT COUNT(*) AS n FROM audit_log WHERE workflow_id='wf-cascade'"
+            ).fetchone()["n"] == 1
+        finally:
+            conn.close()
+
+
+def test_purge_preserves_audit_hash_chain():
+    """Purging workflow state must not invalidate the global audit hash chain."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "audit-chain.db")
+        db = AtrinDatabase(db_path)
+        engine = WorkflowEngine(db)
+        workflow_id = engine.create_workflow(
+            "retain audit",
+            [Task(task_id="audit-task", description="audit-only")],
+        )
+        assert engine.validate_audit_chain() is True
+
+        conn = db.get_connection()
+        try:
+            conn.execute(
+                "UPDATE workflows SET state='COMPLETED', updated_at='2020-01-01 00:00:00' WHERE workflow_id=?",
+                (workflow_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        assert db.purge_workflows_older_than(retention_days=30) == 1
+        assert engine.validate_audit_chain() is True
+
+        conn = db.get_connection()
+        try:
+            assert conn.execute(
+                "SELECT COUNT(*) AS n FROM workflows WHERE workflow_id=?", (workflow_id,)
             ).fetchone()["n"] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) AS n FROM audit_log WHERE workflow_id=?", (workflow_id,)
+            ).fetchone()["n"] == 1
         finally:
             conn.close()
 
