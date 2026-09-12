@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import uuid
+from typing import Callable
 
 
 class AtrinDatabase:
@@ -31,6 +32,35 @@ class AtrinDatabase:
     def _add_column_if_missing(cls, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         if column not in cls._columns(conn, table):
             conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {definition}')
+
+    def _ensure_migrations_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                id TEXT PRIMARY KEY,
+                applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+    def _applied_migrations(self, conn: sqlite3.Connection) -> set[str]:
+        return {row["id"] for row in conn.execute("SELECT id FROM schema_migrations").fetchall()}
+
+    def _apply_migration(
+        self, conn: sqlite3.Connection, applied: set[str], migration_id: str,
+        apply_fn: "Callable[[sqlite3.Connection], object]",
+    ) -> None:
+        """
+        Run a single named, idempotent migration step and record it in the
+        schema_migrations ledger. Existing additive schema primitives remain
+        safe, so legacy databases can be retroactively marked as migrated.
+        """
+        if migration_id in applied:
+            return
+        apply_fn(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (id) VALUES (?) ON CONFLICT(id) DO NOTHING",
+            (migration_id,),
+        )
+        applied.add(migration_id)
 
     def _create_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute("""
@@ -204,43 +234,71 @@ class AtrinDatabase:
                 conn.execute("UPDATE workflows SET client_request_id=NULL WHERE workflow_id=?", (row["workflow_id"],))
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
-        for column, definition in (
-            ("confirmed_at", "TIMESTAMP"),
-            ("expires_at", "TIMESTAMP"),
-            ("claim_owner", "TEXT"),
-            ("attempt", "INTEGER NOT NULL DEFAULT 0"),
-            ("operation_id", "TEXT"),
-        ):
-            self._add_column_if_missing(conn, "idempotency_ledger", column, definition)
+        self._ensure_migrations_table(conn)
+        applied = self._applied_migrations(conn)
 
-        for column, definition in (
-            ("provider_profile_id", "TEXT"),
-            ("fencing_token", "INTEGER"),
-            ("operation_id", "TEXT"),
-            ("side_effecting", "INTEGER NOT NULL DEFAULT 1"),
-        ):
-            self._add_column_if_missing(conn, "steps", column, definition)
+        self._apply_migration(conn, applied, "001_idempotency_ledger_recovery_columns", lambda c: [
+            self._add_column_if_missing(c, "idempotency_ledger", column, definition)
+            for column, definition in (
+                ("confirmed_at", "TIMESTAMP"),
+                ("expires_at", "TIMESTAMP"),
+                ("claim_owner", "TEXT"),
+                ("attempt", "INTEGER NOT NULL DEFAULT 0"),
+                ("operation_id", "TEXT"),
+            )
+        ])
 
-        self._add_column_if_missing(conn, "workflow_checkpoints", "revision", "INTEGER NOT NULL DEFAULT 0")
-        self._add_column_if_missing(conn, "workflows", "client_request_id", "TEXT")
-        for column, definition in (
-            ("path", "TEXT"),
-            ("sha256", "TEXT"),
-            ("updated_at", "TIMESTAMP"),
-        ):
-            self._add_column_if_missing(conn, "plugins_registry", column, definition)
+        self._apply_migration(conn, applied, "002_steps_fencing_and_operation_columns", lambda c: [
+            self._add_column_if_missing(c, "steps", column, definition)
+            for column, definition in (
+                ("provider_profile_id", "TEXT"),
+                ("fencing_token", "INTEGER"),
+                ("operation_id", "TEXT"),
+                ("side_effecting", "INTEGER NOT NULL DEFAULT 1"),
+            )
+        ])
 
-        self._backfill_operation_ids(conn)
-        self._repair_duplicate_request_ids(conn)
+        self._apply_migration(
+            conn, applied, "003_checkpoint_revision_column",
+            lambda c: self._add_column_if_missing(c, "workflow_checkpoints", "revision", "INTEGER NOT NULL DEFAULT 0"),
+        )
 
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_workflows_client_request_id ON workflows(client_request_id) WHERE client_request_id IS NOT NULL")
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_steps_operation_id ON steps(operation_id) WHERE operation_id IS NOT NULL")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_workflow_step ON idempotency_ledger(workflow_id, step_id, provider_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_expiry ON idempotency_ledger(status, expires_at)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_operation ON idempotency_ledger(operation_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_steps_workflow_order ON steps(task_id, order_index)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner_expiry ON sessions(lock_owner, lease_expiry)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_plugins_active ON plugins_registry(is_active)")
+        self._apply_migration(
+            conn, applied, "004_workflow_client_request_id_column",
+            lambda c: self._add_column_if_missing(c, "workflows", "client_request_id", "TEXT"),
+        )
+
+        self._apply_migration(conn, applied, "005_plugins_registry_hash_columns", lambda c: [
+            self._add_column_if_missing(c, "plugins_registry", column, definition)
+            for column, definition in (
+                ("path", "TEXT"),
+                ("sha256", "TEXT"),
+                ("updated_at", "TIMESTAMP"),
+            )
+        ])
+
+        self._apply_migration(
+            conn, applied, "006_sync_metadata_last_known_remote_revision",
+            lambda c: self._add_column_if_missing(c, "sync_metadata", "last_known_remote_revision", "INTEGER"),
+        )
+
+        def _migration_007(c: sqlite3.Connection) -> None:
+            self._backfill_operation_ids(c)
+            self._repair_duplicate_request_ids(c)
+
+        self._apply_migration(conn, applied, "007_backfill_and_repair_ids", _migration_007)
+
+        def _migration_008(c: sqlite3.Connection) -> None:
+            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_workflows_client_request_id ON workflows(client_request_id) WHERE client_request_id IS NOT NULL")
+            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_steps_operation_id ON steps(operation_id) WHERE operation_id IS NOT NULL")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_workflow_step ON idempotency_ledger(workflow_id, step_id, provider_id)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_expiry ON idempotency_ledger(status, expires_at)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_idempotency_operation ON idempotency_ledger(operation_id)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_steps_workflow_order ON steps(task_id, order_index)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner_expiry ON sessions(lock_owner, lease_expiry)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_plugins_active ON plugins_registry(is_active)")
+
+        self._apply_migration(conn, applied, "008_core_indexes", _migration_008)
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS schema_metadata (
@@ -266,6 +324,17 @@ class AtrinDatabase:
 
     def get_connection(self) -> sqlite3.Connection:
         return self._configure_connection(sqlite3.connect(self.db_path))
+
+    def list_applied_migrations(self) -> list[dict[str, str]]:
+        """Return the named schema migrations recorded for this database."""
+        connection = self.get_connection()
+        try:
+            rows = connection.execute(
+                "SELECT id, applied_at FROM schema_migrations ORDER BY applied_at, id"
+            ).fetchall()
+            return [{"id": row["id"], "applied_at": row["applied_at"]} for row in rows]
+        finally:
+            connection.close()
 
     def purge_workflows_older_than(self, retention_days: int) -> int:
         """
@@ -297,9 +366,6 @@ class AtrinDatabase:
                 conn.commit()
                 return 0
 
-            # Delete one workflow at a time with fully static SQL statements.
-            # This keeps the foreign-key ordering explicit and avoids constructing
-            # SQL syntax from runtime values while preserving parameter binding.
             for workflow_id in stale_ids:
                 conn.execute(
                     "DELETE FROM steps WHERE task_id IN "
