@@ -4,6 +4,7 @@ Tests for the named, tracked migration framework (بند ۱۸/۲۲).
 import os
 import sqlite3
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 from atrin_core.database import AtrinDatabase
 
@@ -104,3 +105,26 @@ def test_schema_version_metadata_still_maintained():
         conn.close()
         assert row is not None
         assert int(row["value"]) == AtrinDatabase.CURRENT_SCHEMA_VERSION
+
+
+def test_concurrent_database_initialization_serializes_migrations():
+    """
+    Multiple real threads opening the same new SQLite database concurrently
+    must serialize schema creation/migration and leave one complete migration
+    ledger. This guards the migration framework's exactly-once claim under
+    genuine contention rather than only sequential re-open tests.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "concurrent.db")
+
+        def open_database() -> int:
+            return len(AtrinDatabase(db_path).list_applied_migrations())
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            counts = list(executor.map(lambda _: open_database(), range(8)))
+
+        assert counts == [8] * 8
+        db = AtrinDatabase(db_path)
+        applied = db.list_applied_migrations()
+        assert len(applied) == 8
+        assert len({entry["id"] for entry in applied}) == 8

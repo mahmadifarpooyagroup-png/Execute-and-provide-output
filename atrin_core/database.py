@@ -316,9 +316,13 @@ class AtrinDatabase:
         os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
         conn = self._configure_connection(sqlite3.connect(self.db_path))
         try:
+            conn.execute("BEGIN IMMEDIATE")
             self._create_schema(conn)
             self._migrate(conn)
             conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
