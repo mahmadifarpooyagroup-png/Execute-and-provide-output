@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { clearRuntimeToken, getRuntimeToken, setRuntimeToken } from '../services/api'
+import { clearRuntimeToken, getRuntimeToken, runHousekeeping, setRuntimeToken } from '../services/api'
 import { useAppStore } from '../store/appStore'
 
 export function SettingsPage() {
@@ -8,6 +8,9 @@ export function SettingsPage() {
   const { settings, loadSettings, saveSettings } = useAppStore()
   const [token, setToken] = useState(() => getRuntimeToken() ?? '')
   const [saved, setSaved] = useState(false)
+  const [housekeepingBusy, setHousekeepingBusy] = useState(false)
+  const [housekeepingResult, setHousekeepingResult] = useState<string | null>(null)
+  const [housekeepingError, setHousekeepingError] = useState<string | null>(null)
 
   useEffect(() => {
     void loadSettings()
@@ -22,6 +25,24 @@ export function SettingsPage() {
 
   const updateSetting = <K extends keyof typeof settings>(key: K, value: (typeof settings)[K]) => {
     saveSettings({ ...settings, [key]: value })
+  }
+
+  // FIX (بند ۲/۱۵): retentionDays now drives a real housekeeping action
+  // instead of sitting unused in localStorage.
+  const handleRunHousekeeping = async () => {
+    setHousekeepingBusy(true)
+    setHousekeepingError(null)
+    setHousekeepingResult(null)
+    try {
+      const result = await runHousekeeping(settings.retentionDays)
+      setHousekeepingResult(t('housekeeping_result', { count: result.workflows_deleted }))
+    } catch (housekeepingRunError) {
+      setHousekeepingError(
+        housekeepingRunError instanceof Error ? housekeepingRunError.message : String(housekeepingRunError),
+      )
+    } finally {
+      setHousekeepingBusy(false)
+    }
   }
 
   return (
@@ -67,15 +88,27 @@ export function SettingsPage() {
         </div>
         <div className="setting-row">
           <span>{t('retention_period')}</span>
-          <input
-            className="setting-input"
-            type="number"
-            min={1}
-            max={3650}
-            value={settings.retentionDays}
-            onChange={(event) => updateSetting('retentionDays', Number(event.target.value))}
-          />
-          <span className="muted">{t('days')}</span>
+          <div>
+            <input
+              className="setting-input"
+              type="number"
+              min={1}
+              max={3650}
+              value={settings.retentionDays}
+              onChange={(event) => updateSetting('retentionDays', Number(event.target.value))}
+            />
+            <span className="muted"> {t('days')}</span>
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={housekeepingBusy}
+              onClick={() => void handleRunHousekeeping()}
+            >
+              {housekeepingBusy ? t('saving') : t('run_housekeeping_now')}
+            </button>
+          </div>
+          {housekeepingResult && <div className="muted">{housekeepingResult}</div>}
+          {housekeepingError && <div className="error-banner" role="alert">{housekeepingError}</div>}
         </div>
         <div className="setting-row">
           <span>{t('notifications')}</span>

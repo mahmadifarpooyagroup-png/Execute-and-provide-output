@@ -64,5 +64,10 @@
   "side_effecting_action": "این عملیات وضعیت بیرونی را تغییر می‌دهد",
   "no_provider_profiles": "ابتدا یک پروفایل ارائه‌دهنده اضافه کنید.",
   "no_runnable_step": "برای این جریان کاری مرحله قابل اجرا وجود ندارد.",
-  "run_next": "اجرای مرحله بعد"
+  "run_next": "اجرای مرحله بعد",
+  "authenticate_provider": "احراز هویت",
+  "logout_provider": "خروج",
+  "auto_recovery_active": "بازیابی خودکار فعال است — گردش‌کارهای در صف به‌طور خودکار از سر گرفته می‌شوند.",
+  "run_housekeeping_now": "پاکسازی همین حالا",
+  "housekeeping_result": "{{count}} گردش‌کار قدیمی حذف شد."
 }

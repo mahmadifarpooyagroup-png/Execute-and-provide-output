@@ -90,9 +90,7 @@ fn runtime_is_owned(token_path: &Path) -> bool {
     };
     if token.is_empty()
         || token.len() > 512
-        || token
-            .bytes()
-            .any(|byte| byte == b'\r' || byte == b'\n')
+        || token.bytes().any(|byte| byte == b'\r' || byte == b'\n')
     {
         return false;
     }

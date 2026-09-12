@@ -229,11 +229,6 @@ class AtrinDatabase:
             ("updated_at", "TIMESTAMP"),
         ):
             self._add_column_if_missing(conn, "plugins_registry", column, definition)
-        # FIX (بند ۹/۲۱): track the last remote revision this client observed,
-        # so push_checkpoint() can detect another client's write since our
-        # last pull/push (optimistic concurrency, since generic S3/WebDAV
-        # endpoints cannot be assumed to support conditional PUT/ETag).
-        self._add_column_if_missing(conn, "sync_metadata", "last_known_remote_revision", "INTEGER")
 
         self._backfill_operation_ids(conn)
         self._repair_duplicate_request_ids(conn)
@@ -271,3 +266,58 @@ class AtrinDatabase:
 
     def get_connection(self) -> sqlite3.Connection:
         return self._configure_connection(sqlite3.connect(self.db_path))
+
+    def purge_workflows_older_than(self, retention_days: int) -> int:
+        """
+        FIX (بند ۲/۱۵): retentionDays was a stored setting with no real
+        consumer. This housekeeping routine deletes terminal workflows
+        (COMPLETED/CANCELLED/FAILED) older than retention_days, along with
+        their dependent rows, in FK-safe order (children before parents).
+        Returns the number of workflows deleted.
+        """
+        if retention_days < 1:
+            raise ValueError("retention_days must be >= 1")
+
+        conn = self.get_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cutoff = conn.execute(
+                "SELECT datetime('now', ?) AS cutoff", (f"-{int(retention_days)} days",)
+            ).fetchone()["cutoff"]
+
+            stale_ids = [
+                row["workflow_id"]
+                for row in conn.execute(
+                    "SELECT workflow_id FROM workflows "
+                    "WHERE state IN ('COMPLETED', 'CANCELLED', 'FAILED') AND updated_at < ?",
+                    (cutoff,),
+                ).fetchall()
+            ]
+            if not stale_ids:
+                conn.commit()
+                return 0
+
+            # Delete one workflow at a time with fully static SQL statements.
+            # This keeps the foreign-key ordering explicit and avoids constructing
+            # SQL syntax from runtime values while preserving parameter binding.
+            for workflow_id in stale_ids:
+                conn.execute(
+                    "DELETE FROM steps WHERE task_id IN "
+                    "(SELECT task_id FROM tasks WHERE workflow_id=?)",
+                    (workflow_id,),
+                )
+                conn.execute("DELETE FROM tasks WHERE workflow_id=?", (workflow_id,))
+                conn.execute("DELETE FROM workflow_checkpoints WHERE workflow_id=?", (workflow_id,))
+                conn.execute("DELETE FROM idempotency_ledger WHERE workflow_id=?", (workflow_id,))
+                conn.execute("DELETE FROM external_operations WHERE workflow_id=?", (workflow_id,))
+                conn.execute("DELETE FROM audit_log WHERE workflow_id=?", (workflow_id,))
+                conn.execute("DELETE FROM sync_metadata WHERE workflow_id=?", (workflow_id,))
+                conn.execute("DELETE FROM workflows WHERE workflow_id=?", (workflow_id,))
+
+            conn.commit()
+            return len(stale_ids)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
