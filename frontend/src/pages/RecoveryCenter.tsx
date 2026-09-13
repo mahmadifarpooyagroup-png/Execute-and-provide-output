@@ -29,7 +29,7 @@ export function RecoveryCenterPage() {
     }
   }
 
-  // FIX (בند ۲/۱۵): honor the 'autoRecover' setting instead of leaving it
+  // FIX (بند ۲/۱۵): honor the 'autoRecover' setting instead of leaving it
   // as inert stored state — automatically attempt recovery for queued items
   // the first time they appear, without re-attempting known failures.
   useEffect(() => {

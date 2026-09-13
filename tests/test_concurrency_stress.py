@@ -126,7 +126,7 @@ async def test_cancel_during_execute_does_not_corrupt_state():
 @pytest.mark.asyncio
 async def test_two_concurrent_workers_claiming_same_step_only_one_executes():
     """
-    Four 'workers' (concurrent asyncio tasks) call execute_step() for the
+    Two 'workers' (concurrent asyncio tasks) call execute_step() for the
     SAME step_id at the same time. The idempotency ledger's atomic INSERT/
     UPDATE claim must ensure only one of them actually dispatches the
     side-effecting action — the other must either receive the same

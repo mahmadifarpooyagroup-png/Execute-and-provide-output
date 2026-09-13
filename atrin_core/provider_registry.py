@@ -292,6 +292,48 @@ class ProviderAdapterRegistry:
                     adapters[provider.id] = _ProfileAwareAdapter(provider, database, factory)
         return adapters
 
+    async def check_profile_auth(self, provider_id: str, profile_id: str, database: Any) -> str:
+        """
+        FIX (بند ۸/۱۰): probe a specific provider profile's authentication state.
+
+        Prefers the adapter's own check_auth() when available (web adapters:
+        probes the live page for login/challenge indicators). Falls back to
+        health() for API-style adapters (MCP/A2A/ACP/chat-completions), where
+        a reachable, non-degraded endpoint is treated as AUTHENTICATED.
+        Returns one of: AUTHENTICATED, LOGIN_REQUIRED, NOT_AUTHENTICATED, UNKNOWN.
+        """
+        provider = self.providers.get(provider_id)
+        if provider is None:
+            raise LookupError(f"Provider not configured: {provider_id}")
+        factory = self._FACTORIES.get(provider.adapter_id.lower())
+        if factory is None:
+            raise ValueError(f"Unsupported provider adapter: {provider.adapter_id}")
+
+        adapter = factory(provider, profile_id)
+        check_auth = getattr(adapter, "check_auth", None)
+        try:
+            if callable(check_auth):
+                result = check_auth()
+                value = await result if hasattr(result, "__await__") else result
+                return str(value).upper()
+
+            health = getattr(adapter, "health", None)
+            if callable(health):
+                result = health()
+                value = str(await result if hasattr(result, "__await__") else result).upper()
+                if value == "HEALTHY" or value == "OK":
+                    return "AUTHENTICATED"
+                if value == "DEGRADED":
+                    return "LOGIN_REQUIRED"
+                return "NOT_AUTHENTICATED"
+            return "UNKNOWN"
+        finally:
+            close = getattr(adapter, "close", None)
+            if callable(close):
+                result = close()
+                if hasattr(result, "__await__"):
+                    await result
+
     @classmethod
     def from_environment(cls, env_name: str = "ATRIN_PROVIDERS_JSON") -> "ProviderAdapterRegistry":
         registry = cls()

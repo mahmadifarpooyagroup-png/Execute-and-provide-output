@@ -22,6 +22,10 @@ def build_client(tmp_path):
 
 
 def test_structured_error_for_converted_endpoint(tmp_path):
+    """
+    /workflows/{id}/run uses api_error() explicitly — verify the exact
+    structured shape including our custom code and extra fields.
+    """
     client, token = build_client(tmp_path)
     headers = {"X-Atrin-Token": token}
     response = client.post(
@@ -40,7 +44,15 @@ def test_structured_error_for_converted_endpoint(tmp_path):
 
 
 def test_structured_error_for_legacy_plain_string_detail(tmp_path):
+    """
+    An endpoint that still raises HTTPException(detail=<plain string>)
+    (e.g. auth failure, or any not yet converted to api_error()) must
+    STILL come back wrapped in the same {error: {code, message,
+    recoverable}} shape via the global exception handler.
+    """
     client, _ = build_client(tmp_path)
+    # No token header -> 401 from require_auth, which still uses a plain
+    # string HTTPException detail.
     response = client.get("/api/v1/status")
     assert response.status_code == 401
     body = response.json()
@@ -48,10 +60,14 @@ def test_structured_error_for_legacy_plain_string_detail(tmp_path):
     error = body["error"]
     assert error["code"] == "UNAUTHORIZED"
     assert isinstance(error["message"], str) and error["message"]
-    assert error["recoverable"] is True
+    assert error["recoverable"] is True  # 401 < 500
 
 
 def test_structured_error_for_unmatched_route(tmp_path):
+    """
+    Even a route FastAPI itself 404s (never touched our code) must come
+    back in the structured shape, not FastAPI's raw {"detail": "Not Found"}.
+    """
     client, token = build_client(tmp_path)
     response = client.get("/api/v1/this-route-does-not-exist", headers={"X-Atrin-Token": token})
     assert response.status_code == 404
@@ -61,8 +77,10 @@ def test_structured_error_for_unmatched_route(tmp_path):
 
 
 def test_structured_error_for_validation_failure(tmp_path):
+    """A pydantic validation failure (malformed request body) must also use the structured shape."""
     client, token = build_client(tmp_path)
     headers = {"X-Atrin-Token": token}
+    # Missing required 'step_id' field
     response = client.post(
         "/api/v1/workflows/some-id/run",
         json={},
@@ -76,14 +94,18 @@ def test_structured_error_for_validation_failure(tmp_path):
 
 
 def test_structured_error_includes_recoverable_flag_for_conflict(tmp_path):
+    """409 Conflict responses must mark recoverable=True (client can retry after resolving)."""
     client, token = build_client(tmp_path)
     headers = {"X-Atrin-Token": token}
+
     response = client.post(
         "/api/v1/providers",
         json={"profile_id": "dup-profile", "provider_id": "prov-x", "account_id": "acct-x", "name": "X"},
         headers=headers,
     )
     assert response.status_code == 201
+
+    # Same profile_id again -> conflict
     response = client.post(
         "/api/v1/providers",
         json={"profile_id": "dup-profile", "provider_id": "prov-x", "account_id": "acct-x", "name": "X"},

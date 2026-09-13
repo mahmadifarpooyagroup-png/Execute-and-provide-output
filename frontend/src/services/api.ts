@@ -82,6 +82,8 @@ export interface RuntimeAuditItem {
 
 export class RuntimeApiError extends Error {
   readonly status: number
+  // FIX (بند ۲۶): expose the structured error contract fields so callers
+  // can branch on `code` or `recoverable` instead of parsing message text.
   readonly code: string
   readonly recoverable: boolean | null
 
@@ -143,6 +145,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       }
     }
     if (!response.ok) {
+      // FIX (بند ۲۶): the runtime now returns {"error": {"code","message",
+      // "recoverable"}} for every failure. Fall back to the legacy plain
+      // "detail" string shape, then a generic message, for resilience.
       let errorMessage = `Runtime API request failed (${response.status})`
       let errorCode = 'ERROR'
       let errorRecoverable: boolean | null = null
@@ -179,7 +184,14 @@ export async function isRuntimeApiAvailable(): Promise<boolean> {
   }
 }
 
-export async function getStatus(): Promise<{ status: string; message: string; version: string }> {
+export async function getStatus(): Promise<{
+  status: string
+  message: string
+  version: string
+  started_at?: number
+  uptime_seconds?: number
+  runtime_pid?: number
+}> {
   return request('/api/v1/status')
 }
 
@@ -229,6 +241,38 @@ export async function createProviderProfile(input: {
 export async function getProviders(limit = 100, offset = 0): Promise<RuntimeProvider[]> {
   const response = await request<{ items: RuntimeProvider[] }>(`/api/v1/providers?limit=${limit}&offset=${offset}`)
   return response.items
+}
+
+// FIX (بند ۸/۱۰): real provider authentication flow
+export async function authenticateProvider(profileId: string): Promise<{
+  profile_id: string
+  provider_id: string
+  auth_state: string
+}> {
+  return request(`/api/v1/providers/${encodeURIComponent(profileId)}/authenticate`, { method: 'POST' })
+}
+
+export async function logoutProvider(profileId: string): Promise<{ profile_id: string; auth_state: string }> {
+  return request(`/api/v1/providers/${encodeURIComponent(profileId)}/logout`, { method: 'POST' })
+}
+
+export async function getProviderAuthStatus(profileId: string): Promise<{
+  profile_id: string
+  provider_id: string
+  auth_state: string
+  updated_at: string
+}> {
+  return request(`/api/v1/providers/${encodeURIComponent(profileId)}/auth-status`)
+}
+
+// FIX (بند ۲/۱۵): give the retentionDays setting a real backend consumer
+export async function runHousekeeping(retentionDays: number): Promise<{
+  retention_days: number
+  workflows_deleted: number
+}> {
+  return request(`/api/v1/housekeeping/run?retention_days=${encodeURIComponent(String(retentionDays))}`, {
+    method: 'POST',
+  })
 }
 
 export async function getWorkflows(limit = 100, offset = 0): Promise<RuntimeWorkflow[]> {
@@ -300,15 +344,5 @@ export async function runWorkflowStep(workflowId: string, stepId: string): Promi
   return request(`/api/v1/workflows/${encodeURIComponent(workflowId)}/run`, {
     method: 'POST',
     body: JSON.stringify({ step_id: stepId }),
-  })
-}
-
-// FIX (بند ۲/۱۵): give the retentionDays setting a real backend consumer
-export async function runHousekeeping(retentionDays: number): Promise<{
-  retention_days: number
-  workflows_deleted: number
-}> {
-  return request(`/api/v1/housekeeping/run?retention_days=${encodeURIComponent(String(retentionDays))}`, {
-    method: 'POST',
   })
 }

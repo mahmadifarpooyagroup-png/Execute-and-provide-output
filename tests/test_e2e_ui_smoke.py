@@ -61,7 +61,59 @@ def test_app_redirects_new_users_to_wizard():
     assert "/dashboard" in app_source
 
 
+def test_providers_page_wires_authenticate_and_logout():
+    """
+    FIX (بند ۸/۱۰): Providers.tsx must call the real authenticate/logout
+    endpoints via handlers wired to buttons — not just display profile
+    metadata as if 'Connected' meant 'authenticated'.
+    """
+    providers_source = _read_file("frontend/src/pages/Providers.tsx")
+    assert "authenticateProvider" in providers_source
+    assert "logoutProvider" in providers_source
+    assert "handleAuthenticate" in providers_source
+    assert "handleLogout" in providers_source
+    assert "onClick" in providers_source
+
+
+def test_api_service_exposes_provider_auth_endpoints():
+    api_source = _read_file("frontend/src/services/api.ts")
+    assert "/authenticate" in api_source
+    assert "/logout" in api_source
+    assert "/auth-status" in api_source
+
+
+def test_recovery_center_consumes_auto_recover_setting():
+    """
+    FIX (بند ۲/۱۵): autoRecover must actually trigger automatic resume,
+    not just sit in localStorage as inert stored state.
+    """
+    source = _read_file("frontend/src/pages/RecoveryCenter.tsx")
+    assert "settings.autoRecover" in source
+    assert "resumeWorkflow" in source
+
+
+def test_settings_page_wires_housekeeping():
+    """
+    FIX (بند ۲/۱۵): retentionDays must have a real consumer — the
+    housekeeping endpoint — reachable from the Settings page.
+    """
+    source = _read_file("frontend/src/pages/Settings.tsx")
+    assert "runHousekeeping" in source
+    assert "settings.retentionDays" in source
+    assert "onClick" in source
+
+
+def test_api_service_exposes_housekeeping_endpoint():
+    api_source = _read_file("frontend/src/services/api.ts")
+    assert "/api/v1/housekeeping/run" in api_source
+
+
 def test_api_client_parses_structured_error_contract():
+    """
+    FIX (بند ۲۶): after the runtime moved to {error:{code,message,recoverable}},
+    the frontend's request() must read that shape (not the old 'detail' string)
+    so RuntimeApiError carries a real message instead of undefined/[object Object].
+    """
     api_source = _read_file("frontend/src/services/api.ts")
     assert "record.error" in api_source
     assert "structured.message" in api_source

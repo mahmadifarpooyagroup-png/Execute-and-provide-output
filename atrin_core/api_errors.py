@@ -46,6 +46,9 @@ def api_error(
 def _normalize_detail(status_code: int, detail: Any) -> dict[str, Any]:
     if isinstance(detail, dict) and "code" in detail and "message" in detail:
         return detail
+    # Legacy or framework-raised HTTPException with a plain string/other
+    # detail — wrap it into the same contract shape so every response is
+    # structured, even call sites this pass didn't hand-convert.
     return {
         "code": _default_code_for_status(status_code),
         "message": str(detail) if detail else "An error occurred",
@@ -66,6 +69,11 @@ def _default_code_for_status(status_code: int) -> str:
 
 
 def install_error_handlers(app: FastAPI) -> None:
+    # FIX: register on Starlette's base HTTPException (not just FastAPI's
+    # subclass) so unmatched-route 404s and other framework-raised errors
+    # — which surface as starlette.exceptions.HTTPException before ever
+    # reaching application code — are ALSO wrapped in the structured shape,
+    # not just errors our own endpoint code raises.
     @app.exception_handler(StarletteHTTPException)
     async def _handle_http_exception(request: Request, exc: StarletteHTTPException) -> JSONResponse:
         return JSONResponse(

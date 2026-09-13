@@ -34,7 +34,9 @@ class ProviderInteractionStrategy(ABC):
     async def detect_completion(self) -> bool:
         raise NotImplementedError
 
-    async def verify_action(self, idempotency_key: str, *, operation_id: str | None = None) -> bool:
+    async def verify_action(
+        self, idempotency_key: str, *, operation_id: str | None = None, strict: bool = False
+    ) -> bool:
         """Return True only when the provider can correlate the requested action with its result."""
         return False
 
@@ -92,7 +94,9 @@ class ConfigurableWebStrategy(ProviderInteractionStrategy):
             return await self._visible(completion_selector)
         return bool(await self.extract_response())
 
-    async def verify_action(self, idempotency_key: str, *, operation_id: str | None = None) -> bool:
+    async def verify_action(
+        self, idempotency_key: str, *, operation_id: str | None = None, strict: bool = False
+    ) -> bool:
         verification_selector = self._selector("verification_selector")
         if verification_selector:
             locator = self.page.locator(verification_selector)
@@ -107,6 +111,12 @@ class ConfigurableWebStrategy(ProviderInteractionStrategy):
         if verification_text:
             response = await self.extract_response()
             return verification_text in response
+        # FIX (بند ۱۳): a side-effecting action (strict=True) with no explicit
+        # verification_selector/verification_text configured must NOT be
+        # confirmed by mere non-empty completion — that is too weak a signal
+        # for send/delete/submit/purchase-style actions. Require explicit config.
+        if strict:
+            return False
         return await self.detect_completion()
 
     async def cancel_action(self, idempotency_key: str, *, operation_id: str | None = None) -> bool:

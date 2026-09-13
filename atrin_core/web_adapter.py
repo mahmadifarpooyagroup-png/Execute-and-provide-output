@@ -66,6 +66,7 @@ class GenericWebAdapter(IProviderAdapter):
         self.strategy: Optional[ProviderInteractionStrategy] = None
         self._owns_browser = False
         self._last_action_key: Optional[str] = None
+        self._last_side_effecting: bool = True  # safe-side default
         self._last_operation_id: Optional[str] = None
 
     async def launch(self, url: Optional[str] = None) -> Page:
@@ -141,6 +142,21 @@ class GenericWebAdapter(IProviderAdapter):
     async def detect_auth_challenge(self) -> bool:
         strategy = await self._ready()
         return await strategy.detect_auth_challenge()
+
+    async def check_auth(self) -> str:
+        """
+        FIX (بند ۸/۱۰): probe the current page for login/challenge indicators
+        and return one of AUTHENTICATED / LOGIN_REQUIRED / NOT_AUTHENTICATED.
+        Used by the /providers/{id}/authenticate API endpoint so auth_state
+        reflects the real page state instead of staying frozen at profile
+        creation time.
+        """
+        strategy = await self._ready()
+        if await strategy.detect_auth_challenge():
+            return "LOGIN_REQUIRED"
+        if await strategy.detect_login_page():
+            return "NOT_AUTHENTICATED"
+        return "AUTHENTICATED"
 
     async def capture_evidence(self, *, screenshot: bool = False) -> dict[str, Any]:
         page = self.page
@@ -255,11 +271,15 @@ class GenericWebAdapter(IProviderAdapter):
         *,
         operation_id: str | None = None,
         fencing_token: Optional[int] = None,
+        side_effecting: bool = True,
     ) -> dict[str, Any]:
         self._check_fencing_token(fencing_token)
         strategy = await self._ready()
         self._last_action_key = idempotency_key
         self._last_operation_id = operation_id
+        # FIX (بند ۱۳): remember whether this action was side-effecting so
+        # verify_action() can require strict/explicit confirmation for it
+        self._last_side_effecting = side_effecting
         await strategy.send_message(action)
         deadline = asyncio.get_running_loop().time() + self.completion_timeout
         while not await strategy.detect_completion():
@@ -282,7 +302,9 @@ class GenericWebAdapter(IProviderAdapter):
             return "AMBIGUOUS"
         if await strategy.detect_auth_challenge():
             return "AUTH_REQUIRED"
-        if await strategy.verify_action(idempotency_key, operation_id=operation_id):
+        if await strategy.verify_action(
+            idempotency_key, operation_id=operation_id, strict=self._last_side_effecting
+        ):
             return "CONFIRMED"
         return "AMBIGUOUS"
 

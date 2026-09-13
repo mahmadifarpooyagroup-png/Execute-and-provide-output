@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import {
   getProviders as getRuntimeProviders,
   getRecoveryQueue as getRuntimeRecoveryQueue,
+  getStatus as getRuntimeStatus,
   getWorkflows as getRuntimeWorkflows,
   type RuntimeProvider,
   type RuntimeRecoveryItem,
@@ -176,6 +177,18 @@ function mapRecoveryItem(item: RuntimeRecoveryItem): RecoveryItem {
   }
 }
 
+function formatUptime(seconds: number | undefined): string {
+  if (seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return '—'
+  const totalSeconds = Math.floor(seconds)
+  const days = Math.floor(totalSeconds / 86400)
+  const hours = Math.floor((totalSeconds % 86400) / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  if (days > 0) return `${days}d ${hours}h`
+  if (hours > 0) return `${hours}h ${minutes}m`
+  if (minutes > 0) return `${minutes}m`
+  return `${totalSeconds}s`
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Runtime is unavailable. Check that the Atrin runtime is running.'
 }
@@ -202,10 +215,11 @@ export const useAppStore = create<AppState>((set) => ({
   error: null,
 
   loadDashboard: async () => withLoading(set, async () => {
-    const [providers, workflows, recoveryQueue] = await Promise.all([
+    const [providers, workflows, recoveryQueue, status] = await Promise.all([
       getRuntimeProviders(),
       getRuntimeWorkflows(),
       getRuntimeRecoveryQueue(),
+      getRuntimeStatus().catch(() => null), // FIX (بند ۷/۱۹): uptime must not block the rest of the dashboard
     ])
     const mappedProviders = providers.map(mapProvider)
     const mappedWorkflows = workflows.map(mapWorkflow)
@@ -214,7 +228,7 @@ export const useAppStore = create<AppState>((set) => ({
       healthyProviders: mappedProviders.filter((provider) => provider.status === 'healthy').length,
       activeWorkflows: mappedWorkflows.filter((workflow) => !['completed', 'cancelled'].includes(workflow.status)).length,
       alerts: recoveryQueue.length,
-      uptime: '—',
+      uptime: formatUptime(status?.uptime_seconds),
     }
     set({ dashboard, providers: mappedProviders, workflows: mappedWorkflows, recoveryQueue: recoveryQueue.map(mapRecoveryItem) })
   }),

@@ -1,7 +1,13 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
-import { createProviderProfile, getProviderCatalog, type RuntimeProviderCatalogItem } from '../services/api'
+import {
+  authenticateProvider,
+  createProviderProfile,
+  getProviderCatalog,
+  logoutProvider,
+  type RuntimeProviderCatalogItem,
+} from '../services/api'
 import { useAppStore } from '../store/appStore'
 
 export function ProvidersPage() {
@@ -16,6 +22,8 @@ export function ProvidersPage() {
   const [providerId, setProviderId] = useState('')
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
+  const [authBusyId, setAuthBusyId] = useState<string | null>(null)
+  const [authErrors, setAuthErrors] = useState<Record<string, string>>({})
 
   useEffect(() => {
     let active = true
@@ -58,6 +66,38 @@ export function ProvidersPage() {
   }
 
   const selectedProviderId = providerId || catalog[0]?.id || ''
+
+  const handleAuthenticate = async (profileId: string) => {
+    setAuthBusyId(profileId)
+    setAuthErrors((prev) => ({ ...prev, [profileId]: '' }))
+    try {
+      await authenticateProvider(profileId)
+      await loadProviders()
+    } catch (authError) {
+      setAuthErrors((prev) => ({
+        ...prev,
+        [profileId]: authError instanceof Error ? authError.message : String(authError),
+      }))
+    } finally {
+      setAuthBusyId(null)
+    }
+  }
+
+  const handleLogout = async (profileId: string) => {
+    setAuthBusyId(profileId)
+    setAuthErrors((prev) => ({ ...prev, [profileId]: '' }))
+    try {
+      await logoutProvider(profileId)
+      await loadProviders()
+    } catch (authError) {
+      setAuthErrors((prev) => ({
+        ...prev,
+        [profileId]: authError instanceof Error ? authError.message : String(authError),
+      }))
+    } finally {
+      setAuthBusyId(null)
+    }
+  }
 
   return (
     <section className="page-grid">
@@ -118,6 +158,27 @@ export function ProvidersPage() {
               <div className="row-meta">
                 <span className={`badge ${provider.status}`}>{provider.status}</span>
                 <span className="muted">{provider.lastSync}</span>
+                <div className="row-actions">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={authBusyId === provider.id}
+                    onClick={() => void handleAuthenticate(provider.id)}
+                  >
+                    {authBusyId === provider.id ? t('saving') : t('authenticate_provider')}
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={authBusyId === provider.id}
+                    onClick={() => void handleLogout(provider.id)}
+                  >
+                    {t('logout_provider')}
+                  </button>
+                </div>
+                {authErrors[provider.id] && (
+                  <div className="error-banner" role="alert">{authErrors[provider.id]}</div>
+                )}
               </div>
             </div>
           ))}

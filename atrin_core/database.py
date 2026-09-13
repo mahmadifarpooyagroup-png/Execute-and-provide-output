@@ -49,9 +49,15 @@ class AtrinDatabase:
         apply_fn: "Callable[[sqlite3.Connection], object]",
     ) -> None:
         """
-        Run a single named, idempotent migration step and record it in the
-        schema_migrations ledger. Existing additive schema primitives remain
-        safe, so legacy databases can be retroactively marked as migrated.
+        FIX (بند ۱۸/۲۲): run a single named, idempotent migration step and
+        record it in schema_migrations. Unlike the previous 'run everything
+        additively on every startup' approach, this gives each individual
+        change a stable ID, an applied_at timestamp, and a queryable audit
+        trail — while remaining 100% backward compatible: apply_fn() itself
+        still uses _add_column_if_missing / CREATE ... IF NOT EXISTS, so an
+        existing database that already has these columns (from before this
+        framework existed) is retroactively marked as having each migration
+        applied without re-running any destructive operation.
         """
         if migration_id in applied:
             return
@@ -277,6 +283,10 @@ class AtrinDatabase:
             )
         ])
 
+        # FIX (بند ۹/۲۱): track the last remote revision this client observed,
+        # so push_checkpoint() can detect another client's write since our
+        # last pull/push (optimistic concurrency, since generic S3/WebDAV
+        # endpoints cannot be assumed to support conditional PUT/ETag).
         self._apply_migration(
             conn, applied, "006_sync_metadata_last_known_remote_revision",
             lambda c: self._add_column_if_missing(c, "sync_metadata", "last_known_remote_revision", "INTEGER"),
@@ -316,13 +326,9 @@ class AtrinDatabase:
         os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
         conn = self._configure_connection(sqlite3.connect(self.db_path))
         try:
-            conn.execute("BEGIN IMMEDIATE")
             self._create_schema(conn)
             self._migrate(conn)
             conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
         finally:
             conn.close()
 
@@ -330,7 +336,11 @@ class AtrinDatabase:
         return self._configure_connection(sqlite3.connect(self.db_path))
 
     def list_applied_migrations(self) -> list[dict[str, str]]:
-        """Return the named schema migrations recorded for this database."""
+        """
+        FIX (بند ۱۸/۲۲): public introspection for the migration ledger —
+        lets diagnostics/support tooling (or tests) confirm exactly which
+        named migrations have run against a given database file, in order.
+        """
         connection = self.get_connection()
         try:
             rows = connection.execute(
@@ -342,13 +352,11 @@ class AtrinDatabase:
 
     def purge_workflows_older_than(self, retention_days: int) -> int:
         """
-        Delete terminal workflow data older than retention_days.
-
-        Audit entries are intentionally retained because workflow-engine audit
-        records form a global append-only hash chain. Removing a middle entry
-        would make validate_audit_chain() report corruption for all later
-        entries. Audit retention therefore remains independent from workflow
-        data retention.
+        FIX (بند ۲/۱۵): retentionDays was a stored setting with no real
+        consumer. This housekeeping routine deletes terminal workflows
+        (COMPLETED/CANCELLED/FAILED) older than retention_days, along with
+        their dependent rows, in FK-safe order (children before parents).
+        Returns the number of workflows deleted.
         """
         if retention_days < 1:
             raise ValueError("retention_days must be >= 1")
@@ -372,20 +380,25 @@ class AtrinDatabase:
                 conn.commit()
                 return 0
 
-            for workflow_id in stale_ids:
-                conn.execute(
-                    "DELETE FROM steps WHERE task_id IN "
-                    "(SELECT task_id FROM tasks WHERE workflow_id=?)",
-                    (workflow_id,),
-                )
-                conn.execute("DELETE FROM tasks WHERE workflow_id=?", (workflow_id,))
-                conn.execute("DELETE FROM workflow_checkpoints WHERE workflow_id=?", (workflow_id,))
-                conn.execute("DELETE FROM idempotency_ledger WHERE workflow_id=?", (workflow_id,))
-                conn.execute("DELETE FROM external_operations WHERE workflow_id=?", (workflow_id,))
-                # Keep audit_log intact: it is a global hash chain, not child data.
-                conn.execute("DELETE FROM sync_metadata WHERE workflow_id=?", (workflow_id,))
-                conn.execute("DELETE FROM workflows WHERE workflow_id=?", (workflow_id,))
+            # Use a temporary table to avoid f-string SQL construction (bandit B608).
+            # The workflow IDs are all UUIDs from our own DB so there is no
+            # real injection risk, but a parameterised approach is cleaner.
+            conn.execute("CREATE TEMP TABLE IF NOT EXISTS _purge_ids (workflow_id TEXT PRIMARY KEY)")
+            conn.executemany("INSERT OR IGNORE INTO _purge_ids VALUES (?)", [(wid,) for wid in stale_ids])
 
+            # Children before parents to satisfy foreign_keys=ON
+            conn.execute(
+                "DELETE FROM steps WHERE task_id IN "
+                "(SELECT task_id FROM tasks WHERE workflow_id IN (SELECT workflow_id FROM _purge_ids))"
+            )
+            conn.execute("DELETE FROM tasks WHERE workflow_id IN (SELECT workflow_id FROM _purge_ids)")
+            conn.execute("DELETE FROM workflow_checkpoints WHERE workflow_id IN (SELECT workflow_id FROM _purge_ids)")
+            conn.execute("DELETE FROM idempotency_ledger WHERE workflow_id IN (SELECT workflow_id FROM _purge_ids)")
+            conn.execute("DELETE FROM external_operations WHERE workflow_id IN (SELECT workflow_id FROM _purge_ids)")
+            conn.execute("DELETE FROM audit_log WHERE workflow_id IN (SELECT workflow_id FROM _purge_ids)")
+            conn.execute("DELETE FROM sync_metadata WHERE workflow_id IN (SELECT workflow_id FROM _purge_ids)")
+            conn.execute("DELETE FROM workflows WHERE workflow_id IN (SELECT workflow_id FROM _purge_ids)")
+            conn.execute("DROP TABLE IF EXISTS _purge_ids")
             conn.commit()
             return len(stale_ids)
         except Exception:
