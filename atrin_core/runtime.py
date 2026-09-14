@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
 from typing import Mapping, Optional
 
 import uvicorn
@@ -82,8 +83,9 @@ def create_app(
     registry = provider_registry or ProviderAdapterRegistry.from_environment()
     effective_adapters = dict(adapters) if adapters is not None else registry.build_adapters(database)
     workflow_engine = WorkflowEngine(database, adapters=effective_adapters, session_manager=session_manager)
+    started_at = time.time()  # FIX (بند ۷/۱۹): real process start time for uptime reporting
     app = FastAPI(title="Atrin Local Control Plane", version=API_VERSION)
-    install_error_handlers(app)
+    install_error_handlers(app)  # FIX (بند ۲۶): standard {code, message, recoverable} error contract
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_allowed_origins(),
@@ -111,8 +113,16 @@ def create_app(
         return {"status": "healthy", "service": "atrin-control-plane", "version": app.version}
 
     @app.get("/api/v1/status")
-    def get_status(authenticated: bool = Depends(require_auth)) -> dict[str, str]:
-        return {"status": "operational", "message": "Local runtime is secure and running", "version": app.version}
+    def get_status(authenticated: bool = Depends(require_auth)) -> dict[str, object]:
+        # FIX (بند ۷/۱۹): real uptime/pid/started_at instead of Dashboard showing '—'
+        return {
+            "status": "operational",
+            "message": "Local runtime is secure and running",
+            "version": app.version,
+            "started_at": started_at,
+            "uptime_seconds": round(time.time() - started_at, 3),
+            "runtime_pid": os.getpid(),
+        }
 
     @app.get("/api/v1/provider-catalog")
     def provider_catalog(authenticated: bool = Depends(require_auth)) -> dict:
@@ -212,11 +222,15 @@ def create_app(
             result = await workflow_engine.execute_step(workflow_id, request.step_id)
             return {"workflow_id": workflow_id, "step_id": request.step_id, "result": result}
         except LookupError as error:
-            raise api_error(404, "WORKFLOW_NOT_FOUND", str(error), recoverable=False, workflow_id=workflow_id) from error
+            raise api_error(404, "WORKFLOW_NOT_FOUND", str(error), recoverable=False,
+                            workflow_id=workflow_id) from error
         except PermissionError as error:
-            raise api_error(403, "EXECUTION_LEASE_DENIED", str(error), recoverable=True, workflow_id=workflow_id, step_id=request.step_id) from error
+            raise api_error(403, "EXECUTION_LEASE_DENIED", str(error), recoverable=True,
+                            workflow_id=workflow_id, step_id=request.step_id) from error
         except RuntimeError as error:
-            raise api_error(409, "STEP_EXECUTION_UNSAFE", "Workflow execution could not be completed safely", recoverable=True, workflow_id=workflow_id, step_id=request.step_id, underlying_error=str(error)) from error
+            raise api_error(409, "STEP_EXECUTION_UNSAFE", "Workflow execution could not be completed safely",
+                            recoverable=True, workflow_id=workflow_id, step_id=request.step_id,
+                            underlying_error=str(error)) from error
 
     @app.post("/api/v1/workflows/{workflow_id}/pause")
     async def pause_workflow(workflow_id: str, request: PauseRequest, authenticated: bool = Depends(require_auth)):
@@ -224,9 +238,11 @@ def create_app(
             await workflow_engine.pause_workflow(workflow_id, request.reason)
             return {"workflow_id": workflow_id, "state": workflow_engine.get_workflow_state(workflow_id).value}
         except LookupError as error:
-            raise api_error(404, "WORKFLOW_NOT_FOUND", str(error), recoverable=False, workflow_id=workflow_id) from error
+            raise api_error(404, "WORKFLOW_NOT_FOUND", str(error), recoverable=False,
+                            workflow_id=workflow_id) from error
         except RuntimeError as error:
-            raise api_error(409, "WORKFLOW_PAUSE_REJECTED", "Workflow cannot be paused in its current state", recoverable=True, workflow_id=workflow_id) from error
+            raise api_error(409, "WORKFLOW_PAUSE_REJECTED", "Workflow cannot be paused in its current state",
+                            recoverable=True, workflow_id=workflow_id) from error
 
     @app.post("/api/v1/workflows/{workflow_id}/resume")
     async def resume_workflow(workflow_id: str, authenticated: bool = Depends(require_auth)):
@@ -234,9 +250,11 @@ def create_app(
             result = await workflow_engine.resume_workflow(workflow_id)
             return {"workflow_id": workflow_id, "result": result}
         except LookupError as error:
-            raise api_error(404, "WORKFLOW_NOT_FOUND", str(error), recoverable=False, workflow_id=workflow_id) from error
+            raise api_error(404, "WORKFLOW_NOT_FOUND", str(error), recoverable=False,
+                            workflow_id=workflow_id) from error
         except RuntimeError as error:
-            raise api_error(409, "WORKFLOW_RESUME_UNSAFE", "Workflow cannot be resumed safely", recoverable=True, workflow_id=workflow_id, underlying_error=str(error)) from error
+            raise api_error(409, "WORKFLOW_RESUME_UNSAFE", "Workflow cannot be resumed safely",
+                            recoverable=True, workflow_id=workflow_id, underlying_error=str(error)) from error
 
     @app.post("/api/v1/workflows/{workflow_id}/cancel")
     async def cancel_workflow(workflow_id: str, authenticated: bool = Depends(require_auth)):
@@ -244,9 +262,12 @@ def create_app(
             await workflow_engine.cancel_workflow(workflow_id)
             return {"workflow_id": workflow_id, "state": WorkflowState.CANCELLED.value}
         except LookupError as error:
-            raise api_error(404, "WORKFLOW_NOT_FOUND", str(error), recoverable=False, workflow_id=workflow_id) from error
+            raise api_error(404, "WORKFLOW_NOT_FOUND", str(error), recoverable=False,
+                            workflow_id=workflow_id) from error
         except RuntimeError as error:
-            raise api_error(409, "PROVIDER_CANCELLATION_UNCONFIRMED", "Workflow cancellation requires provider confirmation", recoverable=True, workflow_id=workflow_id, underlying_error=str(error)) from error
+            raise api_error(409, "PROVIDER_CANCELLATION_UNCONFIRMED",
+                            "Workflow cancellation requires provider confirmation",
+                            recoverable=True, workflow_id=workflow_id) from error
 
     def _list_provider_profiles(limit: int, offset: int) -> dict:
         connection = database.get_connection()
@@ -276,6 +297,71 @@ def create_app(
             raise HTTPException(status_code=409, detail="Provider profile already exists or violates a database constraint") from error
         except (ValueError, RuntimeError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
+
+    def _get_profile_provider_id(profile_id: str) -> str:
+        connection = database.get_connection()
+        try:
+            row = connection.execute(
+                "SELECT provider_id FROM provider_profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail=f"Provider profile not found: {profile_id}")
+            return row["provider_id"]
+        finally:
+            connection.close()
+
+    # FIX (بند ۸/۱۰): real provider authentication flow — previously only
+    # profile metadata existed; auth_state never reflected the live login state.
+    @app.post("/api/v1/providers/{profile_id}/authenticate")
+    async def authenticate_provider(profile_id: str, authenticated: bool = Depends(require_auth)) -> dict:
+        provider_id = _get_profile_provider_id(profile_id)
+        try:
+            state = await registry.check_profile_auth(provider_id, profile_id, database)
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        try:
+            session_manager.set_auth_state(profile_id, state)
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {"profile_id": profile_id, "provider_id": provider_id, "auth_state": state}
+
+    @app.get("/api/v1/providers/{profile_id}/auth-status")
+    def get_provider_auth_status(profile_id: str, authenticated: bool = Depends(require_auth)) -> dict:
+        connection = database.get_connection()
+        try:
+            row = connection.execute(
+                "SELECT id AS profile_id, provider_id, auth_state, updated_at "
+                "FROM provider_profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail=f"Provider profile not found: {profile_id}")
+            return dict(row)
+        finally:
+            connection.close()
+
+    @app.post("/api/v1/providers/{profile_id}/logout")
+    def logout_provider(profile_id: str, authenticated: bool = Depends(require_auth)) -> dict:
+        try:
+            session_manager.set_auth_state(profile_id, "NOT_AUTHENTICATED")
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {"profile_id": profile_id, "auth_state": "NOT_AUTHENTICATED"}
+
+    # FIX (بند ۲/۱۵): retentionDays was stored in Settings with no real
+    # consumer. This endpoint lets the frontend (or the user) actually
+    # purge old terminal workflows according to that setting.
+    @app.post("/api/v1/housekeeping/run")
+    def run_housekeeping(
+        retention_days: int = Query(30, ge=1, le=3650),
+        authenticated: bool = Depends(require_auth),
+    ) -> dict:
+        try:
+            deleted = database.purge_workflows_older_than(retention_days)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {"retention_days": retention_days, "workflows_deleted": deleted}
 
     def _list_sessions(limit: int, offset: int) -> dict:
         connection = database.get_connection()
@@ -366,20 +452,6 @@ def create_app(
     @app.get("/api/v1/audit/verify")
     def verify_audit(authenticated: bool = Depends(require_auth)) -> dict[str, bool]:
         return {"valid": workflow_engine.validate_audit_chain()}
-
-    # FIX (بند ۲/۱۵): retentionDays was stored in Settings with no real
-    # consumer. This endpoint lets the frontend (or the user) actually
-    # purge old terminal workflows according to that setting.
-    @app.post("/api/v1/housekeeping/run")
-    def run_housekeeping(
-        retention_days: int = Query(30, ge=1, le=3650),
-        authenticated: bool = Depends(require_auth),
-    ) -> dict:
-        try:
-            deleted = database.purge_workflows_older_than(retention_days)
-        except ValueError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
-        return {"retention_days": retention_days, "workflows_deleted": deleted}
 
     return app
 

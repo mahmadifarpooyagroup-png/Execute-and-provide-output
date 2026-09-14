@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import types
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 

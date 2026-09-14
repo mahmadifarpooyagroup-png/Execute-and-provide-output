@@ -201,3 +201,28 @@ class SessionManager:
             return row[0] if row else AuthState.UNKNOWN.value
         finally:
             conn.close()
+
+    def set_auth_state(self, profile_id: str, state: AuthState | str) -> None:
+        """
+        FIX (بند ۸/۱۰): persist a provider profile's authentication state.
+        Called by the authenticate/logout API endpoints and by adapters after
+        a login/logout attempt, so auth_state reflects reality instead of
+        staying frozen at profile-creation time.
+        """
+        value = state.value if isinstance(state, AuthState) else str(state)
+        # Validate against the known enum so bad values fail loudly, not silently
+        AuthState(value)
+        conn = self.db.get_connection()
+        try:
+            cursor = conn.execute(
+                "UPDATE provider_profiles SET auth_state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (value, profile_id),
+            )
+            if cursor.rowcount == 0:
+                raise LookupError(f"Provider profile not found: {profile_id}")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()

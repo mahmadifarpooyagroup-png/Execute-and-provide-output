@@ -270,7 +270,8 @@ class WorkflowEngine:
 
     async def _execute_action(self, adapter: ActionAdapter, action: str, key: str, operation_id: str,
                               fencing_token: int | None,
-                              step_context: dict[str, Any] | None = None) -> Any:
+                              step_context: dict[str, Any] | None = None,
+                              side_effecting: bool = True) -> Any:
         kwargs: dict[str, Any] = {}
         if _supports_keyword(adapter.execute, "operation_id"):
             kwargs["operation_id"] = operation_id
@@ -280,6 +281,10 @@ class WorkflowEngine:
         # the external task ID → durable recovery across restarts
         if step_context and _supports_keyword(adapter.execute, "step_context"):
             kwargs["step_context"] = step_context
+        # FIX (بند ۱۳): pass side_effecting so web adapter can require strict
+        # verification instead of falling back to weak completion detection
+        if _supports_keyword(adapter.execute, "side_effecting"):
+            kwargs["side_effecting"] = side_effecting
         return await _call(adapter.execute, action, key, **kwargs)
 
     async def _cancel_action(self, adapter: ActionAdapter, key: str, operation_id: str | None) -> bool:
@@ -485,6 +490,7 @@ class WorkflowEngine:
                 adapter, step["action"], key, step["operation_id"], fencing_token,
                 step_context={"workflow_id": workflow_id, "step_id": step_id,
                                "task_id": step["task_id"], "provider_id": step["provider_id"]},
+                side_effecting=bool(step["side_effecting"]),
             )
             evidence = result.get("evidence") if isinstance(result, dict) else None
             result_value = result.get("result", result) if isinstance(result, dict) else result

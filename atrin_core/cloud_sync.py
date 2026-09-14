@@ -21,6 +21,24 @@ from .database import AtrinDatabase
 from .models import SyncConfig, SyncDirection, SyncStatus
 
 
+class RemoteRevisionConflictError(RuntimeError):
+    """
+    FIX (بند ۹/۲۱): raised by push_checkpoint() when the remote checkpoint has
+    advanced past what this client last observed — protects against a blind
+    overwrite when two clients push concurrently.
+    """
+
+    def __init__(self, workflow_id: str, local_revision: int, remote_revision: int):
+        self.workflow_id = workflow_id
+        self.local_revision = local_revision
+        self.remote_revision = remote_revision
+        super().__init__(
+            f"Remote checkpoint for workflow {workflow_id} is at revision "
+            f"{remote_revision}, ahead of the last known revision "
+            f"(pushing revision {local_revision}); pull and resolve before pushing again"
+        )
+
+
 class StorageProvider(Protocol):
     async def upload(self, remote_id: str, payload: bytes) -> None: ...
     async def download(self, remote_id: str) -> bytes: ...
@@ -182,7 +200,19 @@ class CloudSyncManager:
     def _content_hash(cls, checkpoint: dict) -> str:
         return hashlib.sha256(cls._canonical_checkpoint(checkpoint).encode()).hexdigest()
 
-    async def push_checkpoint(self, workflow_id: str) -> SyncStatus:
+    async def push_checkpoint(self, workflow_id: str, *, force: bool = False) -> SyncStatus:
+        """
+        FIX (بند ۹/۲۱): optimistic-concurrency guard before overwriting the
+        remote checkpoint. Generic S3/WebDAV/local-share endpoints cannot be
+        assumed to support conditional PUT / ETag headers, so this client-side
+        check compares the remote's *current* revision against the revision
+        this client last observed (from sync_metadata.last_known_remote_revision).
+        If the remote has moved on since our last pull/push — i.e. another
+        client pushed in the meantime — the overwrite is refused with
+        RemoteRevisionConflictError instead of silently clobbering it.
+        Pass force=True to intentionally overwrite anyway (e.g. after the
+        caller has resolved the conflict via pull_checkpoint()).
+        """
         provider = self._require_provider()
         checkpoint = await self._call(self.recovery_engine.checkpoint_store.load, workflow_id)
         if checkpoint is None:
@@ -190,6 +220,26 @@ class CloudSyncManager:
         revision = int(checkpoint.get("revision", 0))
         content_hash = self._content_hash(checkpoint)
         synced_at = self._timestamp(checkpoint.get("updated_at"))
+        remote_id = self._remote_id(workflow_id)
+
+        if not force:
+            last_known = self._read_last_known_remote_revision(workflow_id)
+            try:
+                existing = self.decrypt_payload(await self._call(provider.download, remote_id))
+                remote_revision = int(existing.get("revision", 0))
+            except Exception:
+                # No remote object yet (first push) or a transient fetch
+                # error — cannot confirm a conflict, so proceed as before.
+                remote_revision = None
+            if remote_revision is not None and (last_known is None or remote_revision > last_known):
+                # Someone else advanced the remote past what we last saw.
+                if remote_revision >= revision:
+                    raise RemoteRevisionConflictError(
+                        workflow_id=workflow_id,
+                        local_revision=revision,
+                        remote_revision=remote_revision,
+                    )
+
         envelope = {
             "checkpoint": checkpoint,
             "synced_at": synced_at,
@@ -197,9 +247,9 @@ class CloudSyncManager:
             "content_hash": content_hash,
             "format_version": self._FORMAT_VERSION,
         }
-        remote_id = self._remote_id(workflow_id)
         await self._call(provider.upload, remote_id, self.encrypt_payload(envelope))
-        self._write_metadata(workflow_id, remote_id, synced_at, SyncDirection.PUSH, False)
+        self._write_metadata(workflow_id, remote_id, synced_at, SyncDirection.PUSH, False,
+                              known_remote_revision=revision)
         return SyncStatus(last_synced_at=datetime.fromisoformat(synced_at), sync_direction=SyncDirection.PUSH,
                           remote_version=str(revision), local_version=str(revision))
 
@@ -232,9 +282,13 @@ class CloudSyncManager:
                 raise ValueError("Local checkpoint metadata is incomplete")
             conflict = remote_revision != local_revision or remote_hash != local_hash
 
+        # FIX (بند ۹/۲۱): record the remote revision we just observed so a
+        # subsequent push_checkpoint() has an up-to-date baseline for its
+        # conflict check, even when this pull itself detected a conflict.
         self._write_metadata(
             workflow_id, remote_id, remote_timestamp,
             SyncDirection.CONFLICT if conflict else SyncDirection.PULL, conflict,
+            known_remote_revision=remote_revision,
         )
         if conflict:
             return {
@@ -295,19 +349,48 @@ class CloudSyncManager:
         return parsed.path if parsed.scheme == "file" else (value or "")
 
     def _write_metadata(self, workflow_id: str, remote_id: str, timestamp: str,
-                        direction: SyncDirection, conflict: bool) -> None:
+                        direction: SyncDirection, conflict: bool,
+                        known_remote_revision: int | None = None) -> None:
         if self.database is None:
             return
         connection = self.database.get_connection()
         try:
-            connection.execute("""INSERT INTO sync_metadata
-                (workflow_id, remote_id, last_synced_at, sync_status, conflict_flag)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(workflow_id) DO UPDATE SET remote_id=excluded.remote_id,
-                last_synced_at=excluded.last_synced_at, sync_status=excluded.sync_status,
-                conflict_flag=excluded.conflict_flag""",
-                (workflow_id, remote_id, timestamp, direction.value, int(conflict)))
+            if known_remote_revision is None:
+                connection.execute("""INSERT INTO sync_metadata
+                    (workflow_id, remote_id, last_synced_at, sync_status, conflict_flag)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(workflow_id) DO UPDATE SET remote_id=excluded.remote_id,
+                    last_synced_at=excluded.last_synced_at, sync_status=excluded.sync_status,
+                    conflict_flag=excluded.conflict_flag""",
+                    (workflow_id, remote_id, timestamp, direction.value, int(conflict)))
+            else:
+                # FIX (بند ۹/۲۱): also persist the revision we just observed
+                # on the remote, so the next push_checkpoint() can detect a
+                # concurrent write by comparing against this value.
+                connection.execute("""INSERT INTO sync_metadata
+                    (workflow_id, remote_id, last_synced_at, sync_status, conflict_flag, last_known_remote_revision)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(workflow_id) DO UPDATE SET remote_id=excluded.remote_id,
+                    last_synced_at=excluded.last_synced_at, sync_status=excluded.sync_status,
+                    conflict_flag=excluded.conflict_flag,
+                    last_known_remote_revision=excluded.last_known_remote_revision""",
+                    (workflow_id, remote_id, timestamp, direction.value, int(conflict), known_remote_revision))
             connection.commit()
+        finally:
+            connection.close()
+
+    def _read_last_known_remote_revision(self, workflow_id: str) -> int | None:
+        if self.database is None:
+            return None
+        connection = self.database.get_connection()
+        try:
+            row = connection.execute(
+                "SELECT last_known_remote_revision FROM sync_metadata WHERE workflow_id = ?",
+                (workflow_id,),
+            ).fetchone()
+            if row is None or row["last_known_remote_revision"] is None:
+                return None
+            return int(row["last_known_remote_revision"])
         finally:
             connection.close()
 
