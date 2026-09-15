@@ -25,7 +25,14 @@ class FakeStorage:
         self.objects[remote_id] = payload
 
     async def download(self, remote_id):
-        return self.objects[remote_id]
+        try:
+            return self.objects[remote_id]
+        except KeyError as error:
+            # FIX: mirror the real StorageProvider contract — 'not found'
+            # must be a specific, distinguishable exception so push_checkpoint()
+            # can tell it apart from a genuine network/auth/decrypt failure.
+            from atrin_core.cloud_sync import RemoteObjectNotFoundError
+            raise RemoteObjectNotFoundError(f"No object at {remote_id!r}") from error
 
 
 def create_workflow_parent(database: AtrinDatabase, workflow_id: str = "workflow-1"):
@@ -231,3 +238,66 @@ async def test_pull_updates_last_known_remote_revision(manager):
 
     last_known = cloud_sync._read_last_known_remote_revision("workflow-1")
     assert last_known is not None
+
+
+# ── FIX: distinguish confirmed-absent from unknown-remote-state ─────────────
+
+@pytest.mark.asyncio
+async def test_push_refuses_when_remote_state_cannot_be_confirmed(manager):
+    """
+    Regression guard: a transient network/auth/decrypt failure while
+    checking the remote's existing state must NOT be silently treated as
+    'object doesn't exist, safe to push' — it must block the push instead,
+    since the client genuinely does not know if it would be overwriting
+    another client's data.
+    """
+    from atrin_core.cloud_sync import RemoteStateUnknownError
+
+    cloud_sync, storage = manager
+
+    class _FlakyStorage:
+        async def upload(self, remote_id, payload):
+            raise AssertionError("upload() must not be called when the state check fails")
+
+        async def download(self, remote_id):
+            raise ConnectionError("simulated network timeout")
+
+    cloud_sync.storage_provider = _FlakyStorage()
+
+    with pytest.raises(RemoteStateUnknownError) as exc_info:
+        await cloud_sync.push_checkpoint("workflow-1")
+    assert exc_info.value.workflow_id == "workflow-1"
+    assert isinstance(exc_info.value.underlying, ConnectionError)
+
+
+@pytest.mark.asyncio
+async def test_push_force_bypasses_unknown_state_check_too(manager):
+    """force=True must also bypass the 'state unknown' refusal, not just the conflict check."""
+    cloud_sync, storage = manager
+
+    class _FlakyStorage:
+        async def upload(self, remote_id, payload):
+            storage.objects[remote_id] = payload  # delegate actual storage
+
+        async def download(self, remote_id):
+            raise ConnectionError("simulated network timeout")
+
+    cloud_sync.storage_provider = _FlakyStorage()
+
+    status = await cloud_sync.push_checkpoint("workflow-1", force=True)
+    assert status.sync_direction == "PUSH"
+
+
+@pytest.mark.asyncio
+async def test_confirmed_not_found_still_allows_first_push(manager):
+    """
+    Sanity check that the distinction actually works both ways: a
+    genuinely confirmed 'no object here yet' (RemoteObjectNotFoundError)
+    must still allow the first push to proceed without requiring force=True.
+    """
+    cloud_sync, storage = manager
+    # storage.objects is empty — FakeStorage.download() raises
+    # RemoteObjectNotFoundError for any missing key, which is the
+    # confirmed-absent case.
+    status = await cloud_sync.push_checkpoint("workflow-1")
+    assert status.sync_direction == "PUSH"

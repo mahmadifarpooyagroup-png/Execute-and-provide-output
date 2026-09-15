@@ -73,7 +73,14 @@ def test_legacy_database_is_upgraded_in_place(tmp_path):
         assert "client_request_id" in workflow_columns
         assert "revision" in checkpoint_columns
         assert {"path", "sha256", "updated_at"}.issubset(plugin_columns)
-        assert connection.execute("SELECT value FROM schema_metadata WHERE key='schema_version'").fetchone()[0] == "6"
+        # FIX: assert against the single source of truth
+        # (AtrinDatabase.CURRENT_SCHEMA_VERSION, derived from
+        # len(MIGRATION_IDS)) instead of a hardcoded literal that can
+        # silently drift out of sync with the real migration count.
+        stored_version = connection.execute(
+            "SELECT value FROM schema_metadata WHERE key='schema_version'"
+        ).fetchone()[0]
+        assert stored_version == str(AtrinDatabase.CURRENT_SCHEMA_VERSION)
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     finally:
         connection.close()

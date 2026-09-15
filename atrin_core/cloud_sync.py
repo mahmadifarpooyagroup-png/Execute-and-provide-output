@@ -39,6 +39,41 @@ class RemoteRevisionConflictError(RuntimeError):
         )
 
 
+class RemoteObjectNotFoundError(LookupError):
+    """
+    Raised by a StorageProvider.download() implementation to signal
+    specifically 'this object does not exist yet' — as opposed to a
+    network timeout, auth failure, TLS error, or any other transient
+    condition. push_checkpoint()'s conflict check treats ONLY this case
+    as safe to proceed with a first push; every other exception is
+    treated as 'remote state unknown' and blocks the push.
+    """
+
+
+class RemoteStateUnknownError(RuntimeError):
+    """
+    FIX: raised by push_checkpoint() when the remote's current state
+    could not be confirmed (network timeout, DNS failure, 401/403, TLS
+    error, or corrupted/undecryptable remote payload) — as opposed to a
+    confirmed 'object does not exist' (RemoteObjectNotFoundError), which
+    is the only case safe to treat as a first push. Previously ANY
+    exception during the pre-push existence check was silently treated
+    as 'no prior object, proceed' — meaning a transient network blip
+    could bypass the entire compare-and-swap protection and overwrite a
+    remote checkpoint the client never actually verified.
+    """
+
+    def __init__(self, workflow_id: str, underlying: BaseException):
+        self.workflow_id = workflow_id
+        self.underlying = underlying
+        super().__init__(
+            f"Cannot confirm remote state for workflow {workflow_id} before push "
+            f"({type(underlying).__name__}: {underlying}); refusing to push without "
+            f"a confirmed baseline. Retry once connectivity/auth/decryption is restored, "
+            f"or pass force=True to override."
+        )
+
+
 class StorageProvider(Protocol):
     async def upload(self, remote_id: str, payload: bytes) -> None: ...
     async def download(self, remote_id: str) -> bytes: ...
@@ -62,6 +97,8 @@ class HTTPStorageProvider:
 
     async def download(self, remote_id: str) -> bytes:
         response = await self._client.get(self._url(remote_id), headers=self.headers)
+        if response.status_code == 404:
+            raise RemoteObjectNotFoundError(f"No remote object at {remote_id!r}")
         response.raise_for_status()
         return response.content
 
@@ -89,7 +126,10 @@ class LocalNetworkStorageProvider:
         temporary.replace(destination)
 
     async def download(self, remote_id: str) -> bytes:
-        return self._path(remote_id).read_bytes()
+        try:
+            return self._path(remote_id).read_bytes()
+        except FileNotFoundError as error:
+            raise RemoteObjectNotFoundError(f"No remote object at {remote_id!r}") from error
 
     async def close(self) -> None:
         return None
@@ -227,10 +267,18 @@ class CloudSyncManager:
             try:
                 existing = self.decrypt_payload(await self._call(provider.download, remote_id))
                 remote_revision = int(existing.get("revision", 0))
-            except Exception:
-                # No remote object yet (first push) or a transient fetch
-                # error — cannot confirm a conflict, so proceed as before.
+            except RemoteObjectNotFoundError:
+                # FIX: confirmed absence — genuinely safe to treat as a first push.
                 remote_revision = None
+            except Exception as error:
+                # FIX: anything else (network timeout, DNS failure, 401/403,
+                # TLS error, corrupted/undecryptable payload) means we could
+                # NOT confirm the remote's actual state. Previously this was
+                # conflated with "object doesn't exist" and silently allowed
+                # the push to proceed — defeating the whole point of the CAS
+                # check. Refuse instead; the caller can retry or pass
+                # force=True once they've deliberately decided to override.
+                raise RemoteStateUnknownError(workflow_id, error) from error
             if remote_revision is not None and (last_known is None or remote_revision > last_known):
                 # Someone else advanced the remote past what we last saw.
                 if remote_revision >= revision:

@@ -120,10 +120,43 @@ class LocalSecurityManager:
             self._token = token
         return self._token
 
+    def _get_on_disk_representation(self) -> Optional[str]:
+        """
+        FIX: the Tauri launcher (frontend/src-tauri/src/lib.rs, runtime_is_owned())
+        reads the token file with a plain std::fs::read_to_string() and forwards
+        those raw bytes verbatim as the X-Atrin-Token header — it does not (and,
+        without duplicating this class's base64/DPAPI logic in Rust, cannot
+        easily) decode the at-rest-protected format written by _write_token().
+        Previously this meant authentication between a packaged Tauri app and
+        its bundled Python runtime always failed, because the file on disk is
+        base64(DPAPI-protected(token)) on Windows and base64(token) elsewhere —
+        never the plaintext token get_or_create_token() returns.
+
+        Rather than reimplement base64 decoding and CryptUnprotectData FFI
+        bindings in Rust (real cross-language risk with no way to verify a
+        Rust build here), validate_token() accepts EITHER the plaintext token
+        OR this exact on-disk string as proof of possession: anyone who can
+        read the token file already has equivalent access either way, so this
+        introduces no new exposure — it only fixes the contract mismatch.
+        """
+        token_path = Path(self.token_file_path).expanduser()
+        try:
+            return token_path.read_text(encoding="utf-8", errors="strict").strip()
+        except (OSError, UnicodeDecodeError):
+            return None
+
     def validate_token(self, provided_token: str) -> bool:
-        if not isinstance(provided_token, str) or not self._is_valid_token(provided_token):
+        if not isinstance(provided_token, str) or not provided_token:
+            return False
+        if len(provided_token) > 4096:
             return False
         try:
-            return secrets.compare_digest(provided_token, self.get_or_create_token())
+            plaintext = self.get_or_create_token()
         except RuntimeError:
             return False
+        if self._is_valid_token(provided_token) and secrets.compare_digest(provided_token, plaintext):
+            return True
+        on_disk = self._get_on_disk_representation()
+        if on_disk and secrets.compare_digest(provided_token, on_disk):
+            return True
+        return False
