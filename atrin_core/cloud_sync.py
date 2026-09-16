@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
 import os
 import re
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -28,13 +31,19 @@ class RemoteRevisionConflictError(RuntimeError):
     overwrite when two clients push concurrently.
     """
 
-    def __init__(self, workflow_id: str, local_revision: int, remote_revision: int):
+    def __init__(self, workflow_id: str, local_revision: int, remote_revision: "int | None"):
         self.workflow_id = workflow_id
         self.local_revision = local_revision
         self.remote_revision = remote_revision
+        if remote_revision is None:
+            detail = (
+                "a concurrent write was detected by the atomic compare-and-swap layer "
+                "(exact remote revision not re-read)"
+            )
+        else:
+            detail = f"is at revision {remote_revision}, ahead of the last known revision"
         super().__init__(
-            f"Remote checkpoint for workflow {workflow_id} is at revision "
-            f"{remote_revision}, ahead of the last known revision "
+            f"Remote checkpoint for workflow {workflow_id} {detail} "
             f"(pushing revision {local_revision}); pull and resolve before pushing again"
         )
 
@@ -77,10 +86,27 @@ class RemoteStateUnknownError(RuntimeError):
 class StorageProvider(Protocol):
     async def upload(self, remote_id: str, payload: bytes) -> None: ...
     async def download(self, remote_id: str) -> bytes: ...
+    # FIX: capability flag so push_checkpoint() can tell whether a provider
+    # offers a TRUE atomic compare-and-swap (an optional upload_if_unchanged
+    # method some providers implement) or only the weaker read-check-write
+    # pattern. Not every StorageProvider implements upload_if_unchanged —
+    # it's accessed dynamically (getattr) only when this flag is True — so
+    # it's intentionally NOT part of this Protocol's structural contract.
+    supports_atomic_cas: bool = False
 
 
 class HTTPStorageProvider:
-    """Uses standard HTTP PUT/GET for S3-compatible and WebDAV endpoints."""
+    """
+    Uses standard HTTP PUT/GET for S3-compatible and WebDAV endpoints.
+
+    supports_atomic_cas is honestly False here: we cannot assume an
+    arbitrary configured endpoint supports conditional PUT (If-Match /
+    If-None-Match) or versioned objects. push_checkpoint() falls back to
+    its optimistic pre-flight conflict *detection* for this provider —
+    which narrows the race window but is NOT a true atomic CAS.
+    """
+
+    supports_atomic_cas = False
 
     def __init__(self, base_url: str, headers: dict[str, str] | None = None, timeout: float = 20.0):
         self.base_url = base_url.rstrip("/")
@@ -107,7 +133,18 @@ class HTTPStorageProvider:
 
 
 class LocalNetworkStorageProvider:
-    """Stores objects in a shared filesystem path, suitable for a mounted share."""
+    """
+    Stores objects in a shared filesystem path, suitable for a mounted share.
+
+    Unlike HTTPStorageProvider, this backend is fully under our control, so
+    it implements a REAL atomic compare-and-swap via an exclusive lock file
+    (O_CREAT | O_EXCL) around the check-then-write sequence — closing the
+    TOCTOU gap that the plain read-check-write pattern has. Two clients
+    sharing the same mounted path will genuinely serialize through the
+    lock, not just detect a conflict after the fact.
+    """
+
+    supports_atomic_cas = True
 
     def __init__(self, root_path: str):
         self.root_path = Path(root_path).expanduser().resolve()
@@ -118,12 +155,85 @@ class LocalNetworkStorageProvider:
             raise ValueError("Remote object ID escapes the configured storage path")
         return candidate
 
-    async def upload(self, remote_id: str, payload: bytes) -> None:
+    def _lock_path(self, remote_id: str) -> Path:
+        return self._path(remote_id).with_name(self._path(remote_id).name + ".lock")
+
+    async def _acquire_lock(self, lock_path: Path, *, timeout: float = 10.0, stale_after: float = 30.0) -> None:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                descriptor = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(descriptor, str(os.getpid()).encode("utf-8"))
+                os.close(descriptor)
+                return
+            except FileExistsError:
+                try:
+                    age = time.time() - lock_path.stat().st_mtime
+                except FileNotFoundError:
+                    continue  # lock was released between our open() and stat()
+                if age > stale_after:
+                    # A crashed holder left this behind — reclaim it rather
+                    # than deadlock forever.
+                    try:
+                        lock_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    continue
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"Could not acquire sync lock for {lock_path} within {timeout}s"
+                    ) from None
+                await asyncio.sleep(0.05)
+
+    def _release_lock(self, lock_path: Path) -> None:
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    async def upload_if_unchanged(
+        self, remote_id: str, payload: bytes, *, expected_remote_hash: str | None
+    ) -> bool:
+        """
+        TRUE atomic compare-and-swap: acquire an exclusive lock, verify the
+        object's current content hash still matches expected_remote_hash
+        (None means 'caller believes no object exists yet'), and only then
+        perform the atomic-rename write — all while holding the lock, so no
+        other process sharing this path can interleave between the check
+        and the write. Returns False (without writing) on a mismatch.
+        """
         destination = self._path(remote_id)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        temporary = destination.with_suffix(destination.suffix + ".tmp")
-        temporary.write_bytes(payload)
-        temporary.replace(destination)
+        lock_path = self._lock_path(remote_id)
+        await self._acquire_lock(lock_path)
+        try:
+            current_hash: str | None = None
+            if destination.exists():
+                current_hash = hashlib.sha256(destination.read_bytes()).hexdigest()
+            if current_hash != expected_remote_hash:
+                return False
+            temporary = destination.with_name(destination.name + f".tmp.{uuid.uuid4().hex}")
+            temporary.write_bytes(payload)
+            temporary.replace(destination)
+            return True
+        finally:
+            self._release_lock(lock_path)
+
+    async def upload(self, remote_id: str, payload: bytes) -> None:
+        """Unconditional overwrite (used for force=True). Still lock-serialized
+        against concurrent upload_if_unchanged() callers to avoid corrupting
+        their check-then-write window."""
+        destination = self._path(remote_id)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self._lock_path(remote_id)
+        await self._acquire_lock(lock_path)
+        try:
+            temporary = destination.with_name(destination.name + f".tmp.{uuid.uuid4().hex}")
+            temporary.write_bytes(payload)
+            temporary.replace(destination)
+        finally:
+            self._release_lock(lock_path)
 
     async def download(self, remote_id: str) -> bytes:
         try:
@@ -242,16 +352,28 @@ class CloudSyncManager:
 
     async def push_checkpoint(self, workflow_id: str, *, force: bool = False) -> SyncStatus:
         """
-        FIX (بند ۹/۲۱): optimistic-concurrency guard before overwriting the
-        remote checkpoint. Generic S3/WebDAV/local-share endpoints cannot be
-        assumed to support conditional PUT / ETag headers, so this client-side
-        check compares the remote's *current* revision against the revision
-        this client last observed (from sync_metadata.last_known_remote_revision).
-        If the remote has moved on since our last pull/push — i.e. another
-        client pushed in the meantime — the overwrite is refused with
-        RemoteRevisionConflictError instead of silently clobbering it.
-        Pass force=True to intentionally overwrite anyway (e.g. after the
-        caller has resolved the conflict via pull_checkpoint()).
+        Compare-and-swap guard before overwriting the remote checkpoint.
+
+        For providers with supports_atomic_cas=True (LocalNetworkStorageProvider),
+        this performs a REAL atomic compare-and-swap: the existence/content
+        check and the write happen under a single exclusive lock, so no
+        other client sharing that path can interleave between them.
+
+        For providers without atomic support (HTTPStorageProvider — we
+        cannot assume an arbitrary configured endpoint supports conditional
+        PUT / ETag headers), this falls back to a client-side pre-flight
+        check: compare the remote's *current* revision against the revision
+        this client last observed. This narrows the race window
+        considerably but is NOT a true atomic CAS — a write from another
+        client landing in the brief gap between our check and our own
+        upload() is still possible. Prefer a supports_atomic_cas=True
+        provider when true consistency guarantees matter.
+
+        Either way, if the remote has moved on since our last pull/push,
+        the overwrite is refused with RemoteRevisionConflictError instead
+        of silently clobbering it. Pass force=True to intentionally
+        overwrite anyway (e.g. after the caller has resolved the conflict
+        via pull_checkpoint()).
         """
         provider = self._require_provider()
         checkpoint = await self._call(self.recovery_engine.checkpoint_store.load, workflow_id)
@@ -262,14 +384,29 @@ class CloudSyncManager:
         synced_at = self._timestamp(checkpoint.get("updated_at"))
         remote_id = self._remote_id(workflow_id)
 
+        envelope = {
+            "checkpoint": checkpoint,
+            "synced_at": synced_at,
+            "revision": revision,
+            "content_hash": content_hash,
+            "format_version": self._FORMAT_VERSION,
+        }
+        encrypted_payload = self.encrypt_payload(envelope)
+
+        atomic_cas = bool(getattr(provider, "supports_atomic_cas", False))
+        expected_remote_hash: str | None = None
+
         if not force:
             last_known = self._read_last_known_remote_revision(workflow_id)
             try:
-                existing = self.decrypt_payload(await self._call(provider.download, remote_id))
+                raw_existing = await self._call(provider.download, remote_id)
+                existing = self.decrypt_payload(raw_existing)
                 remote_revision = int(existing.get("revision", 0))
+                expected_remote_hash = hashlib.sha256(raw_existing).hexdigest()
             except RemoteObjectNotFoundError:
                 # FIX: confirmed absence — genuinely safe to treat as a first push.
                 remote_revision = None
+                expected_remote_hash = None
             except Exception as error:
                 # FIX: anything else (network timeout, DNS failure, 401/403,
                 # TLS error, corrupted/undecryptable payload) means we could
@@ -288,14 +425,27 @@ class CloudSyncManager:
                         remote_revision=remote_revision,
                     )
 
-        envelope = {
-            "checkpoint": checkpoint,
-            "synced_at": synced_at,
-            "revision": revision,
-            "content_hash": content_hash,
-            "format_version": self._FORMAT_VERSION,
-        }
-        await self._call(provider.upload, remote_id, self.encrypt_payload(envelope))
+        if not force and atomic_cas:
+            # FIX: real atomic CAS path — the existence/hash check above was
+            # only our best guess at the time we made it. The lock-protected
+            # write below re-verifies under mutual exclusion and PROVES
+            # whether a concurrent writer landed in between, instead of
+            # just narrowing the probability.
+            # (upload_if_unchanged is not part of the StorageProvider Protocol's
+            # structural contract — only providers with supports_atomic_cas=True
+            # implement it, checked dynamically via the guard above.)
+            written = await provider.upload_if_unchanged(  # type: ignore[attr-defined]
+                remote_id, encrypted_payload, expected_remote_hash=expected_remote_hash
+            )
+            if not written:
+                raise RemoteRevisionConflictError(
+                    workflow_id=workflow_id,
+                    local_revision=revision,
+                    remote_revision=None,  # proven by the atomic layer, exact value not re-read
+                )
+        else:
+            await self._call(provider.upload, remote_id, encrypted_payload)
+
         self._write_metadata(workflow_id, remote_id, synced_at, SyncDirection.PUSH, False,
                               known_remote_revision=revision)
         return SyncStatus(last_synced_at=datetime.fromisoformat(synced_at), sync_direction=SyncDirection.PUSH,
