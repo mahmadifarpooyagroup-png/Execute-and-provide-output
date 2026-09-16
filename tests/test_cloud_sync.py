@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from atrin_core.cloud_sync import CloudSyncManager
@@ -25,7 +27,14 @@ class FakeStorage:
         self.objects[remote_id] = payload
 
     async def download(self, remote_id):
-        return self.objects[remote_id]
+        try:
+            return self.objects[remote_id]
+        except KeyError as error:
+            # FIX: mirror the real StorageProvider contract — 'not found'
+            # must be a specific, distinguishable exception so push_checkpoint()
+            # can tell it apart from a genuine network/auth/decrypt failure.
+            from atrin_core.cloud_sync import RemoteObjectNotFoundError
+            raise RemoteObjectNotFoundError(f"No object at {remote_id!r}") from error
 
 
 def create_workflow_parent(database: AtrinDatabase, workflow_id: str = "workflow-1"):
@@ -231,3 +240,204 @@ async def test_pull_updates_last_known_remote_revision(manager):
 
     last_known = cloud_sync._read_last_known_remote_revision("workflow-1")
     assert last_known is not None
+
+
+# ── FIX: distinguish confirmed-absent from unknown-remote-state ─────────────
+
+@pytest.mark.asyncio
+async def test_push_refuses_when_remote_state_cannot_be_confirmed(manager):
+    """
+    Regression guard: a transient network/auth/decrypt failure while
+    checking the remote's existing state must NOT be silently treated as
+    'object doesn't exist, safe to push' — it must block the push instead,
+    since the client genuinely does not know if it would be overwriting
+    another client's data.
+    """
+    from atrin_core.cloud_sync import RemoteStateUnknownError
+
+    cloud_sync, storage = manager
+
+    class _FlakyStorage:
+        async def upload(self, remote_id, payload):
+            raise AssertionError("upload() must not be called when the state check fails")
+
+        async def download(self, remote_id):
+            raise ConnectionError("simulated network timeout")
+
+    cloud_sync.storage_provider = _FlakyStorage()
+
+    with pytest.raises(RemoteStateUnknownError) as exc_info:
+        await cloud_sync.push_checkpoint("workflow-1")
+    assert exc_info.value.workflow_id == "workflow-1"
+    assert isinstance(exc_info.value.underlying, ConnectionError)
+
+
+@pytest.mark.asyncio
+async def test_push_force_bypasses_unknown_state_check_too(manager):
+    """force=True must also bypass the 'state unknown' refusal, not just the conflict check."""
+    cloud_sync, storage = manager
+
+    class _FlakyStorage:
+        async def upload(self, remote_id, payload):
+            storage.objects[remote_id] = payload  # delegate actual storage
+
+        async def download(self, remote_id):
+            raise ConnectionError("simulated network timeout")
+
+    cloud_sync.storage_provider = _FlakyStorage()
+
+    status = await cloud_sync.push_checkpoint("workflow-1", force=True)
+    assert status.sync_direction == "PUSH"
+
+
+@pytest.mark.asyncio
+async def test_confirmed_not_found_still_allows_first_push(manager):
+    """
+    Sanity check that the distinction actually works both ways: a
+    genuinely confirmed 'no object here yet' (RemoteObjectNotFoundError)
+    must still allow the first push to proceed without requiring force=True.
+    """
+    cloud_sync, storage = manager
+    # storage.objects is empty — FakeStorage.download() raises
+    # RemoteObjectNotFoundError for any missing key, which is the
+    # confirmed-absent case.
+    status = await cloud_sync.push_checkpoint("workflow-1")
+    assert status.sync_direction == "PUSH"
+
+
+# ── FIX: TRUE atomic CAS for LocalNetworkStorageProvider ────────────────────
+
+@pytest.mark.asyncio
+async def test_local_provider_declares_atomic_cas_support(tmp_path):
+    from atrin_core.cloud_sync import LocalNetworkStorageProvider
+
+    provider = LocalNetworkStorageProvider(str(tmp_path / "remote"))
+    assert provider.supports_atomic_cas is True
+
+
+@pytest.mark.asyncio
+async def test_http_provider_honestly_declares_no_atomic_cas_support():
+    """
+    We cannot assume an arbitrary configured HTTP endpoint supports
+    conditional PUT / ETag headers, so this must default to False rather
+    than overclaiming a guarantee we cannot back up.
+    """
+    from atrin_core.cloud_sync import HTTPStorageProvider
+
+    provider = HTTPStorageProvider("https://example.invalid/bucket")
+    assert provider.supports_atomic_cas is False
+
+
+@pytest.mark.asyncio
+async def test_upload_if_unchanged_succeeds_when_expectation_matches(tmp_path):
+    from atrin_core.cloud_sync import LocalNetworkStorageProvider
+
+    provider = LocalNetworkStorageProvider(str(tmp_path / "remote"))
+    written = await provider.upload_if_unchanged("obj-1", b"first-version", expected_remote_hash=None)
+    assert written is True
+    assert await provider.download("obj-1") == b"first-version"
+
+
+@pytest.mark.asyncio
+async def test_upload_if_unchanged_rejects_when_object_already_exists_unexpectedly(tmp_path):
+    """
+    Caller believed no object existed (expected_remote_hash=None) but one
+    is actually there — the atomic layer must refuse, not silently overwrite.
+    """
+    from atrin_core.cloud_sync import LocalNetworkStorageProvider
+
+    provider = LocalNetworkStorageProvider(str(tmp_path / "remote"))
+    await provider.upload("obj-1", b"someone-elses-write")
+
+    written = await provider.upload_if_unchanged("obj-1", b"my-write", expected_remote_hash=None)
+    assert written is False
+    # The original content must be untouched.
+    assert await provider.download("obj-1") == b"someone-elses-write"
+
+
+@pytest.mark.asyncio
+async def test_upload_if_unchanged_rejects_stale_hash(tmp_path):
+    import hashlib
+    from atrin_core.cloud_sync import LocalNetworkStorageProvider
+
+    provider = LocalNetworkStorageProvider(str(tmp_path / "remote"))
+    await provider.upload("obj-1", b"version-1")
+    stale_hash = hashlib.sha256(b"a-different-earlier-version").hexdigest()
+
+    written = await provider.upload_if_unchanged("obj-1", b"version-2", expected_remote_hash=stale_hash)
+    assert written is False
+    assert await provider.download("obj-1") == b"version-1"
+
+
+@pytest.mark.asyncio
+async def test_upload_if_unchanged_succeeds_with_correct_current_hash(tmp_path):
+    import hashlib
+    from atrin_core.cloud_sync import LocalNetworkStorageProvider
+
+    provider = LocalNetworkStorageProvider(str(tmp_path / "remote"))
+    await provider.upload("obj-1", b"version-1")
+    current_hash = hashlib.sha256(b"version-1").hexdigest()
+
+    written = await provider.upload_if_unchanged("obj-1", b"version-2", expected_remote_hash=current_hash)
+    assert written is True
+    assert await provider.download("obj-1") == b"version-2"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_upload_if_unchanged_only_one_winner(tmp_path):
+    """
+    The core proof this is REAL atomicity, not probabilistic: fire many
+    concurrent upload_if_unchanged() calls all believing no object exists
+    yet (expected_remote_hash=None). Exactly one must win; the rest must
+    be cleanly rejected — never silently overwrite each other.
+    """
+    from atrin_core.cloud_sync import LocalNetworkStorageProvider
+
+    provider = LocalNetworkStorageProvider(str(tmp_path / "remote"))
+
+    async def try_write(index: int) -> bool:
+        return await provider.upload_if_unchanged(
+            "obj-1", f"writer-{index}".encode(), expected_remote_hash=None
+        )
+
+    results = await asyncio.gather(*(try_write(i) for i in range(10)))
+    assert sum(1 for r in results if r) == 1, f"expected exactly 1 winner, got: {results}"
+
+
+@pytest.mark.asyncio
+async def test_push_checkpoint_uses_atomic_cas_for_local_provider(tmp_path):
+    """
+    End-to-end: when the configured provider is LocalNetworkStorageProvider
+    (supports_atomic_cas=True), a genuine concurrent push from a second
+    client must be caught by the atomic layer and rejected with
+    RemoteRevisionConflictError — not silently lost.
+    """
+    from atrin_core.cloud_sync import CloudSyncManager, RemoteRevisionConflictError
+
+    checkpoint_a = {"workflow_id": "workflow-1", "revision": 1, "updated_at": "2026-09-04T10:00:00+00:00"}
+    database = AtrinDatabase(str(tmp_path / "atrin.db"))
+    create_workflow_parent(database)
+    client_a = CloudSyncManager(FakeRecoveryEngine(checkpoint_a), database, None)
+    client_a.configure_provider(
+        "local_network", {"path": str(tmp_path / "remote"), "encryption_key": "shared secret!"}
+    )
+
+    # Client A's own first push must still succeed normally.
+    status = await client_a.push_checkpoint("workflow-1")
+    assert status.sync_direction == "PUSH"
+
+    # Simulate client B writing directly (a concurrent client with no
+    # knowledge of A's last_known_remote_revision bookkeeping).
+    checkpoint_b = {"workflow_id": "workflow-1", "revision": 2, "updated_at": "2026-09-04T11:00:00+00:00"}
+    database_b = AtrinDatabase(str(tmp_path / "atrin-b.db"))
+    create_workflow_parent(database_b)
+    client_b = CloudSyncManager(FakeRecoveryEngine(checkpoint_b), database_b, None)
+    client_b.configure_provider(
+        "local_network", {"path": str(tmp_path / "remote"), "encryption_key": "shared secret!"}
+    )
+    await client_b.push_checkpoint("workflow-1")
+
+    # Client A, still believing the remote is at revision 1, tries again —
+    # must be rejected.
+    with pytest.raises(RemoteRevisionConflictError):
+        await client_a.push_checkpoint("workflow-1")

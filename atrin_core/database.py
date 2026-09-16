@@ -9,7 +9,25 @@ from typing import Callable
 class AtrinDatabase:
     """SQLite persistence with per-connection safety pragmas and additive migrations."""
 
-    CURRENT_SCHEMA_VERSION = 6
+    # FIX: single source of truth for the schema version, derived from the
+    # actual list of named migrations instead of a hand-maintained integer.
+    # Previously CURRENT_SCHEMA_VERSION was hardcoded to 6 while _migrate()
+    # applied 8 named steps (001..008) — schema_metadata.schema_version
+    # under-reported the real migration state. Keep this list in the exact
+    # order the migrations are defined in _migrate(); a mismatch between
+    # this list and what _migrate() actually applies is caught by
+    # test_migration_framework.py::test_migration_registry_matches_applied_ids.
+    MIGRATION_IDS: tuple[str, ...] = (
+        "001_idempotency_ledger_recovery_columns",
+        "002_steps_fencing_and_operation_columns",
+        "003_checkpoint_revision_column",
+        "004_workflow_client_request_id_column",
+        "005_plugins_registry_hash_columns",
+        "006_sync_metadata_last_known_remote_revision",
+        "007_backfill_and_repair_ids",
+        "008_core_indexes",
+    )
+    CURRENT_SCHEMA_VERSION = len(MIGRATION_IDS)
 
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -47,6 +65,7 @@ class AtrinDatabase:
     def _apply_migration(
         self, conn: sqlite3.Connection, applied: set[str], migration_id: str,
         apply_fn: "Callable[[sqlite3.Connection], object]",
+        attempted: "set[str] | None" = None,
     ) -> None:
         """
         FIX (بند ۱۸/۲۲): run a single named, idempotent migration step and
@@ -58,7 +77,17 @@ class AtrinDatabase:
         existing database that already has these columns (from before this
         framework existed) is retroactively marked as having each migration
         applied without re-running any destructive operation.
+
+        `attempted`, if provided, collects every migration_id this specific
+        _migrate() call processed - independent of `applied`, which also
+        contains any pre-existing rows already in schema_migrations from
+        prior runs (including, in principle, legacy IDs no longer emitted
+        by current code). Keeping them separate lets the drift check in
+        _migrate() compare 'what this run actually attempted' against
+        MIGRATION_IDS without false positives from old DB history.
         """
+        if attempted is not None:
+            attempted.add(migration_id)
         if migration_id in applied:
             return
         apply_fn(conn)
@@ -242,6 +271,7 @@ class AtrinDatabase:
     def _migrate(self, conn: sqlite3.Connection) -> None:
         self._ensure_migrations_table(conn)
         applied = self._applied_migrations(conn)
+        attempted: set[str] = set()  # every migration_id this call actually processed
 
         self._apply_migration(conn, applied, "001_idempotency_ledger_recovery_columns", lambda c: [
             self._add_column_if_missing(c, "idempotency_ledger", column, definition)
@@ -252,7 +282,7 @@ class AtrinDatabase:
                 ("attempt", "INTEGER NOT NULL DEFAULT 0"),
                 ("operation_id", "TEXT"),
             )
-        ])
+        ], attempted=attempted)
 
         self._apply_migration(conn, applied, "002_steps_fencing_and_operation_columns", lambda c: [
             self._add_column_if_missing(c, "steps", column, definition)
@@ -262,16 +292,18 @@ class AtrinDatabase:
                 ("operation_id", "TEXT"),
                 ("side_effecting", "INTEGER NOT NULL DEFAULT 1"),
             )
-        ])
+        ], attempted=attempted)
 
         self._apply_migration(
             conn, applied, "003_checkpoint_revision_column",
             lambda c: self._add_column_if_missing(c, "workflow_checkpoints", "revision", "INTEGER NOT NULL DEFAULT 0"),
+            attempted=attempted,
         )
 
         self._apply_migration(
             conn, applied, "004_workflow_client_request_id_column",
             lambda c: self._add_column_if_missing(c, "workflows", "client_request_id", "TEXT"),
+            attempted=attempted,
         )
 
         self._apply_migration(conn, applied, "005_plugins_registry_hash_columns", lambda c: [
@@ -281,7 +313,7 @@ class AtrinDatabase:
                 ("sha256", "TEXT"),
                 ("updated_at", "TIMESTAMP"),
             )
-        ])
+        ], attempted=attempted)
 
         # FIX (بند ۹/۲۱): track the last remote revision this client observed,
         # so push_checkpoint() can detect another client's write since our
@@ -290,13 +322,14 @@ class AtrinDatabase:
         self._apply_migration(
             conn, applied, "006_sync_metadata_last_known_remote_revision",
             lambda c: self._add_column_if_missing(c, "sync_metadata", "last_known_remote_revision", "INTEGER"),
+            attempted=attempted,
         )
 
         def _migration_007(c: sqlite3.Connection) -> None:
             self._backfill_operation_ids(c)
             self._repair_duplicate_request_ids(c)
 
-        self._apply_migration(conn, applied, "007_backfill_and_repair_ids", _migration_007)
+        self._apply_migration(conn, applied, "007_backfill_and_repair_ids", _migration_007, attempted=attempted)
 
         def _migration_008(c: sqlite3.Connection) -> None:
             c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_workflows_client_request_id ON workflows(client_request_id) WHERE client_request_id IS NOT NULL")
@@ -308,7 +341,23 @@ class AtrinDatabase:
             c.execute("CREATE INDEX IF NOT EXISTS idx_sessions_owner_expiry ON sessions(lock_owner, lease_expiry)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_plugins_active ON plugins_registry(is_active)")
 
-        self._apply_migration(conn, applied, "008_core_indexes", _migration_008)
+        self._apply_migration(conn, applied, "008_core_indexes", _migration_008, attempted=attempted)
+
+        # FIX: release-gate check — the migrations actually applied during
+        # this _migrate() run must exactly match MIGRATION_IDS. If someone
+        # adds a new _apply_migration(...) call without registering its ID
+        # here (or vice versa), fail loudly at startup instead of silently
+        # drifting schema_metadata.schema_version out of sync with reality.
+        expected = set(self.MIGRATION_IDS)
+        if attempted != expected:
+            missing_from_registry = attempted - expected
+            missing_from_migrate = expected - attempted
+            raise RuntimeError(
+                "Migration registry drift detected: "
+                f"applied-but-unregistered={sorted(missing_from_registry)}, "
+                f"registered-but-never-applied={sorted(missing_from_migrate)}. "
+                "Update AtrinDatabase.MIGRATION_IDS to match _migrate()."
+            )
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS schema_metadata (

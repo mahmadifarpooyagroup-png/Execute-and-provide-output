@@ -108,3 +108,29 @@ def test_schema_version_metadata_still_maintained():
         conn.close()
         assert row is not None
         assert int(row["value"]) == AtrinDatabase.CURRENT_SCHEMA_VERSION
+
+
+def test_schema_version_equals_migration_count_not_hardcoded():
+    """
+    Regression guard: CURRENT_SCHEMA_VERSION must equal len(MIGRATION_IDS),
+    not a hand-maintained integer that can drift out of sync when new
+    migrations are added (previously hardcoded to 6 while 8 named
+    migrations were actually applied).
+    """
+    assert AtrinDatabase.CURRENT_SCHEMA_VERSION == len(AtrinDatabase.MIGRATION_IDS)
+    assert AtrinDatabase.CURRENT_SCHEMA_VERSION == 8
+
+
+def test_migration_registry_matches_applied_ids():
+    """
+    Release-gate test: every migration _migrate() actually attempts must
+    be registered in MIGRATION_IDS, and every ID in MIGRATION_IDS must
+    actually be attempted. A mismatch would previously go unnoticed —
+    this now fails loudly (via a RuntimeError raised inside _migrate()
+    itself) if a future migration is added to the code without updating
+    the registry, or vice versa.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = AtrinDatabase(os.path.join(tmpdir, "gate.db"))
+        applied_ids = {entry["id"] for entry in db.list_applied_migrations()}
+        assert applied_ids == set(AtrinDatabase.MIGRATION_IDS)
