@@ -35,7 +35,7 @@ class FakeStrategy(ProviderInteractionStrategy):
     async def detect_completion(self):
         return bool(await self.extract_response())
 
-    async def verify_action(self, idempotency_key, *, operation_id=None):
+    async def verify_action(self, idempotency_key, *, operation_id=None, strict=False):
         return idempotency_key == "key-1" and operation_id == "operation-1" and await self.detect_completion()
 
 
