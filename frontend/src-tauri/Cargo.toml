@@ -6,6 +6,17 @@ authors = ["Atrin AI Control Plane"]
 repository = "https://github.com/mahmadifarpooyagroup-png/Execute-and-provide-output"
 edition = "2021"
 rust-version = "1.77.2"
+# FIX: cargo-deny's [licenses] check requires every crate in the graph to
+# declare a license, and fails our OWN root crate with
+# 'error[unlicensed]: atrin-control-plane = 0.3.0 is unlicensed' otherwise.
+# This is a private desktop application, never published to crates.io or
+# any registry — not a library meant to carry an open-source license
+# grant. Rather than fabricate a license claim, mark it as unpublished so
+# deny.toml's existing [licenses.private] ignore = true rule (which
+# exempts publish=false crates) correctly skips the license check for it,
+# matching the project's actual stated status (no LICENSE file; see
+# README.md/AUDIT_REPORT.md — treat as proprietary/all-rights-reserved).
+publish = false
 
 [lib]
 name = "app_lib"
