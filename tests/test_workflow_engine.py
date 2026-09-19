@@ -256,3 +256,46 @@ def test_cancel_requires_provider_confirmation_when_action_is_running():
         assert engine.get_workflow_state(workflow_id) == WorkflowState.WAITING_FOR_PROVIDER
     finally:
         temporary_directory.cleanup()
+
+
+# ── FIX: cancel_workflow() must never mutate a COMPLETED workflow ──────────
+
+def test_cancel_completed_workflow_is_a_safe_noop():
+    """
+    Regression guard: COMPLETED is a terminal state with no legal outgoing
+    transitions (state_machine.py: COMPLETED -> set()). Previously
+    cancel_workflow() only short-circuited for CANCELLED — a COMPLETED
+    workflow fell through and was illegally moved to CANCELLING, silently
+    corrupting a successfully-finished workflow. cancel_workflow() on an
+    already-COMPLETED workflow must now be a safe, idempotent no-op.
+    """
+    tmpdir, database, engine, adapter = build_engine()
+    try:
+        workflow_id = make_workflow(engine)
+        asyncio.run(engine.execute_step(workflow_id, "step-1"))
+        assert engine.get_workflow_state(workflow_id) == WorkflowState.COMPLETED
+
+        asyncio.run(engine.cancel_workflow(workflow_id))
+
+        # State must remain COMPLETED — not CANCELLING, not CANCELLED.
+        assert engine.get_workflow_state(workflow_id) == WorkflowState.COMPLETED
+        # The provider's cancel() must never have been called for a
+        # workflow that already finished successfully.
+        assert adapter.calls  # execute() happened
+    finally:
+        tmpdir.cleanup()
+
+
+def test_cancel_completed_workflow_is_idempotent_across_repeated_calls():
+    """Calling cancel_workflow() multiple times on a COMPLETED workflow must remain a no-op every time."""
+    tmpdir, database, engine, adapter = build_engine()
+    try:
+        workflow_id = make_workflow(engine)
+        asyncio.run(engine.execute_step(workflow_id, "step-1"))
+        assert engine.get_workflow_state(workflow_id) == WorkflowState.COMPLETED
+
+        for _ in range(3):
+            asyncio.run(engine.cancel_workflow(workflow_id))
+            assert engine.get_workflow_state(workflow_id) == WorkflowState.COMPLETED
+    finally:
+        tmpdir.cleanup()
