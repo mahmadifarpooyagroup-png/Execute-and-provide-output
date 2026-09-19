@@ -115,6 +115,12 @@ def install_workflow_hardening() -> None:
 
     async def hardened_cancel(self: Any, workflow_id: str) -> None:
         current = _state(self, workflow_id)
+        # NOTE: both CANCELLED and COMPLETED are terminal states with no
+        # legal outgoing transitions — original_cancel() itself now treats
+        # both as a safe no-op (see the matching fix in
+        # WorkflowEngine.cancel_workflow), so it's correct to delegate
+        # directly here without an assert_workflow_transition call that
+        # would otherwise (correctly) reject COMPLETED -> CANCELLING.
         if current in {WorkflowState.CANCELLED, WorkflowState.COMPLETED}:
             await original_cancel(self, workflow_id)
             return

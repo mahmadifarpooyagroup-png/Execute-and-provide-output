@@ -721,7 +721,14 @@ class WorkflowEngine:
             workflow = connection.execute("SELECT state FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
             if workflow is None:
                 raise LookupError(f"Workflow not found: {workflow_id}")
-            if workflow["state"] == WorkflowState.CANCELLED.value:
+            # FIX: COMPLETED is a terminal state with no legal outgoing
+            # transitions (state_machine.py: COMPLETED -> set()). Previously
+            # only CANCELLED short-circuited here; a COMPLETED workflow fell
+            # through to the UPDATE below and was illegally moved to
+            # CANCELLING, silently corrupting a successfully-finished
+            # workflow. Treat it the same as CANCELLED: cancelling an
+            # already-terminal workflow is a safe, idempotent no-op.
+            if workflow["state"] in (WorkflowState.CANCELLED.value, WorkflowState.COMPLETED.value):
                 connection.commit()
                 return
             active = connection.execute("""
